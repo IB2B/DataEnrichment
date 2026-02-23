@@ -1,0 +1,145 @@
+{% extends "base.html" %}
+{% block title %}Scrape #{{ scrape.id }} — Google Maps Scraper{% endblock %}
+{% block content %}
+<div class="p-8 max-w-7xl mx-auto fade-in">
+    <div class="mb-6 flex items-center gap-4">
+        <a href="/google-maps" class="text-gray-400 hover:text-white transition-colors">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
+        </a>
+        <div>
+            <h2 class="text-2xl font-bold text-white">Scrape #{{ scrape.id }}</h2>
+            <p class="text-gray-400 text-xs mt-1 truncate max-w-xl">{{ scrape.search_url }}</p>
+        </div>
+    </div>
+
+    <!-- Stats -->
+    <div class="grid grid-cols-3 gap-4 mb-6">
+        <div class="bg-dark-300 rounded-xl border border-gray-700/50 p-4 text-center">
+            <div class="text-2xl font-bold text-white">{{ scrape.total_found }}</div>
+            <div class="text-xs text-gray-500">Found</div>
+        </div>
+        <div class="bg-dark-300 rounded-xl border border-gray-700/50 p-4 text-center">
+            <div class="text-2xl font-bold text-accent">{{ total }}</div>
+            <div class="text-xs text-gray-500">Extracted</div>
+        </div>
+        <div class="bg-dark-300 rounded-xl border border-gray-700/50 p-4 text-center">
+            <div class="text-2xl font-bold text-gray-300">{{ scrape.created_at[:10] if scrape.created_at else '' }}</div>
+            <div class="text-xs text-gray-500">Date</div>
+        </div>
+    </div>
+
+    <!-- Actions -->
+    <div class="flex items-center gap-3 mb-6">
+        <form action="/google-maps/{{ scrape.id }}" method="GET" class="flex-1">
+            <input type="text" name="search" value="{{ search }}"
+                class="w-full bg-dark-300 border border-gray-700/50 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-accent"
+                placeholder="Search results...">
+        </form>
+        <a href="/google-maps/{{ scrape.id }}/export"
+           class="bg-dark-300 border border-gray-700/50 hover:border-gray-600 text-gray-300 hover:text-white px-4 py-2.5 rounded-lg text-sm transition-colors flex items-center gap-2">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+            Export CSV
+        </a>
+        <form method="POST" action="/api/google-maps/{{ scrape.id }}/delete" onsubmit="return confirm('Delete this scrape and all results?')">
+            <button class="bg-red-500/10 border border-red-500/20 text-red-400 hover:bg-red-500/20 px-4 py-2.5 rounded-lg text-sm transition-colors">Delete</button>
+        </form>
+    </div>
+
+    <!-- Results Table -->
+    {% if results %}
+    <div class="bg-dark-300 rounded-xl border border-gray-700/50 overflow-hidden">
+        <div class="overflow-x-auto">
+            <table class="w-full text-sm" id="results-table">
+                <thead>
+                    <tr class="border-b border-gray-700/50">
+                        <th class="text-left px-4 py-3 text-gray-400 font-medium cursor-pointer hover:text-white" onclick="sortTable(0)">Name</th>
+                        <th class="text-left px-4 py-3 text-gray-400 font-medium cursor-pointer hover:text-white" onclick="sortTable(1)">Category</th>
+                        <th class="text-left px-4 py-3 text-gray-400 font-medium cursor-pointer hover:text-white" onclick="sortTable(2)">Address</th>
+                        <th class="text-left px-4 py-3 text-gray-400 font-medium cursor-pointer hover:text-white" onclick="sortTable(3)">Phone</th>
+                        <th class="text-left px-4 py-3 text-gray-400 font-medium cursor-pointer hover:text-white" onclick="sortTable(4)">Rating</th>
+                        <th class="text-left px-4 py-3 text-gray-400 font-medium cursor-pointer hover:text-white" onclick="sortTable(5)">Reviews</th>
+                        <th class="text-left px-4 py-3 text-gray-400 font-medium cursor-pointer hover:text-white" onclick="sortTable(6)">Website</th>
+                        <th class="text-left px-4 py-3 text-gray-400 font-medium cursor-pointer hover:text-white" onclick="sortTable(7)">Email</th>
+                        <th class="text-left px-4 py-3 text-gray-400 font-medium">Maps</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for r in results %}
+                    <tr class="border-b border-gray-700/30 hover:bg-white/[0.02]">
+                        <td class="px-4 py-3 text-white">{{ r.name }}</td>
+                        <td class="px-4 py-3 text-gray-300 text-xs">{{ r.category }}</td>
+                        <td class="px-4 py-3 text-gray-300 text-xs max-w-[200px] truncate" title="{{ r.address }}">{{ r.address }}</td>
+                        <td class="px-4 py-3 text-gray-300 text-xs">{{ r.phone }}</td>
+                        <td class="px-4 py-3 text-yellow-400 text-xs">{{ r.rating }}{% if r.rating %} ★{% endif %}</td>
+                        <td class="px-4 py-3 text-gray-300 text-xs">{{ r.reviews_count }}</td>
+                        <td class="px-4 py-3 text-xs">
+                            {% if r.website %}
+                            <a href="{{ r.website }}" target="_blank" class="text-accent hover:text-accent-hover truncate block max-w-[150px]" title="{{ r.website }}">{{ r.website[:30] }}</a>
+                            {% endif %}
+                        </td>
+                        <td class="px-4 py-3 text-gray-300 text-xs max-w-[180px] truncate" title="{{ r.email }}">{{ r.email }}</td>
+                        <td class="px-4 py-3">
+                            {% if r.google_maps_url %}
+                            <a href="{{ r.google_maps_url }}" target="_blank" class="text-accent hover:text-accent-hover text-xs">View</a>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    {% else %}
+    <div class="text-center py-16">
+        <p class="text-gray-500">No results found{% if search %} for "{{ search }}"{% endif %}.</p>
+    </div>
+    {% endif %}
+
+    <!-- Pagination -->
+    {% if total_pages > 1 %}
+    <div class="flex items-center justify-between mt-6">
+        <p class="text-gray-400 text-sm">Showing {{ (current_page - 1) * 10 + 1 }}–{{ [current_page * 10, total] | min }} of {{ total }} results</p>
+        <div class="flex items-center gap-1">
+            {% if current_page > 1 %}
+            <a href="/google-maps/{{ scrape.id }}?page={{ current_page - 1 }}{% if search %}&search={{ search }}{% endif %}"
+               class="px-3 py-1.5 text-sm rounded-lg bg-dark-300 border border-gray-700/50 text-gray-300 hover:text-white hover:border-gray-600 transition-colors">&laquo; Prev</a>
+            {% endif %}
+
+            {% for p in range(1, total_pages + 1) %}
+                {% if p == current_page %}
+                <span class="px-3 py-1.5 text-sm rounded-lg bg-accent text-white font-medium">{{ p }}</span>
+                {% elif p == 1 or p == total_pages or (p >= current_page - 2 and p <= current_page + 2) %}
+                <a href="/google-maps/{{ scrape.id }}?page={{ p }}{% if search %}&search={{ search }}{% endif %}"
+                   class="px-3 py-1.5 text-sm rounded-lg bg-dark-300 border border-gray-700/50 text-gray-300 hover:text-white hover:border-gray-600 transition-colors">{{ p }}</a>
+                {% elif p == 2 or p == total_pages - 1 %}
+                <span class="px-2 text-gray-500">...</span>
+                {% endif %}
+            {% endfor %}
+
+            {% if current_page < total_pages %}
+            <a href="/google-maps/{{ scrape.id }}?page={{ current_page + 1 }}{% if search %}&search={{ search }}{% endif %}"
+               class="px-3 py-1.5 text-sm rounded-lg bg-dark-300 border border-gray-700/50 text-gray-300 hover:text-white hover:border-gray-600 transition-colors">Next &raquo;</a>
+            {% endif %}
+        </div>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let sortDir = {};
+function sortTable(col) {
+    const table = document.getElementById('results-table');
+    const tbody = table.querySelector('tbody');
+    const rows = Array.from(tbody.querySelectorAll('tr'));
+    sortDir[col] = !sortDir[col];
+    rows.sort((a, b) => {
+        const aVal = a.cells[col].textContent.trim().toLowerCase();
+        const bVal = b.cells[col].textContent.trim().toLowerCase();
+        return sortDir[col] ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+    });
+    rows.forEach(r => tbody.appendChild(r));
+}
+</script>
+{% endblock %}

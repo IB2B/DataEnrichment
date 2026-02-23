@@ -1,0 +1,341 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — Intelligent Enrichment{% endblock %}
+{% block content %}
+<div class="p-8 max-w-5xl mx-auto fade-in">
+    <div class="mb-8">
+        <h2 class="text-2xl font-bold text-white">Dashboard</h2>
+        <p class="text-gray-400 text-sm mt-1">Start a new enrichment or monitor active jobs</p>
+    </div>
+
+    {% if error %}
+    <div class="bg-red-500/10 border border-red-500/20 rounded-lg px-4 py-3 mb-6">
+        <p class="text-red-400 text-sm">{{ error }}</p>
+    </div>
+    {% endif %}
+    {% if msg %}
+    <div class="bg-green-500/10 border border-green-500/20 rounded-lg px-4 py-3 mb-6">
+        <p class="text-green-400 text-sm">{{ msg }}</p>
+    </div>
+    {% endif %}
+
+    <!-- New Enrichment -->
+    <div class="bg-dark-300 rounded-xl border border-gray-700/50 p-6 mb-8">
+        <h3 class="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+            <svg class="w-5 h-5 text-accent" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6"/></svg>
+            New Enrichment
+        </h3>
+
+        <!-- Google Connection Status -->
+        <div class="mb-5">
+            {% if google_connected %}
+            <div class="flex items-center justify-between bg-dark-400 rounded-lg px-4 py-3">
+                <div class="flex items-center gap-3">
+                    <div class="w-8 h-8 rounded-full bg-green-500/20 flex items-center justify-center">
+                        <svg class="w-4 h-4 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+                    </div>
+                    <div>
+                        <div class="flex items-center gap-2">
+                            <span class="text-sm text-white font-medium">Google Sheets Connected</span>
+                            <span class="text-xs px-2 py-0.5 rounded-full bg-green-500/10 text-green-400">Connected</span>
+                        </div>
+                        <span class="text-xs text-gray-400">{{ google_email }}</span>
+                    </div>
+                </div>
+                <button onclick="disconnectGoogle()" class="text-xs text-gray-400 hover:text-red-400 transition-colors">Disconnect</button>
+            </div>
+            {% else %}
+            <a href="/auth/google"
+               class="inline-flex items-center gap-3 bg-white hover:bg-gray-100 text-gray-800 font-medium px-5 py-3 rounded-lg transition-colors text-sm">
+                <svg class="w-5 h-5" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 01-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
+                Connect Google Sheets
+            </a>
+            <p class="text-xs text-gray-500 mt-2">Connect your Google account to browse and select your spreadsheets</p>
+            {% endif %}
+        </div>
+
+        {% if google_connected %}
+        <!-- Sheet Selection Form -->
+        <form method="POST" action="/api/start" id="enrichment-form" class="space-y-4">
+            <!-- Sheet Selector -->
+            <div>
+                <label class="text-sm text-gray-300 mb-1 block">Select Google Sheet</label>
+                <div class="relative">
+                    <input type="text" id="sheet-search" autocomplete="off"
+                        class="w-full bg-dark-400 border border-gray-600 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent"
+                        placeholder="Search your sheets...">
+                    <div id="sheet-dropdown" class="hidden absolute z-20 w-full mt-1 bg-dark-300 border border-gray-600 rounded-lg shadow-xl max-h-60 overflow-y-auto scrollbar-thin">
+                    </div>
+                </div>
+                <input type="hidden" name="sheet_id" id="sheet-id-input">
+                <div id="selected-sheet" class="hidden mt-2 flex items-center gap-2 bg-dark-400 rounded-lg px-3 py-2">
+                    <svg class="w-4 h-4 text-green-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+                    <span class="text-sm text-white" id="selected-sheet-name"></span>
+                    <button type="button" onclick="clearSheet()" class="ml-auto text-gray-400 hover:text-white text-xs">Change</button>
+                </div>
+            </div>
+
+            <!-- Tab Selector -->
+            <div id="tab-section" class="hidden">
+                <label class="text-sm text-gray-300 mb-1 block">Sheet Tab</label>
+                <select name="sheet_tab" id="tab-select"
+                    class="w-full bg-dark-400 border border-gray-600 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent">
+                    <option value="">Loading tabs...</option>
+                </select>
+            </div>
+
+            <button type="submit" id="start-btn" disabled
+                class="bg-accent hover:bg-accent-hover disabled:opacity-40 disabled:cursor-not-allowed text-white font-medium px-6 py-2.5 rounded-lg transition-colors text-sm flex items-center gap-2">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+                Start Enrichment
+            </button>
+        </form>
+        {% endif %}
+    </div>
+
+    <!-- Active Jobs -->
+    {% if active_jobs %}
+    <div class="mb-8">
+        <h3 class="text-lg font-semibold text-white mb-4">Active Jobs</h3>
+        <div class="space-y-4" id="active-jobs">
+            {% for job in active_jobs %}
+            <div class="bg-dark-300 rounded-xl border border-gray-700/50 p-5" id="job-{{ job.id }}" data-job-id="{{ job.id }}">
+                <div class="flex items-center justify-between mb-3">
+                    <div>
+                        <span class="text-sm font-medium text-white">Job #{{ job.id }}</span>
+                        <span class="ml-2 text-xs px-2 py-0.5 rounded-full {% if job.status == 'running' %}bg-green-500/10 text-green-400{% else %}bg-yellow-500/10 text-yellow-400{% endif %}">
+                            {{ job.status }}
+                        </span>
+                    </div>
+                    <form method="POST" action="/api/job/{{ job.id }}/cancel" class="inline">
+                        <button class="text-xs text-red-400 hover:text-red-300 transition-colors">Cancel</button>
+                    </form>
+                </div>
+                <div class="text-xs text-gray-400 mb-3 truncate">{{ job.sheet_name }} — {{ job.sheet_id }}</div>
+
+                <!-- Progress bar -->
+                <div class="w-full bg-dark-400 rounded-full h-2 mb-3">
+                    <div class="bg-accent rounded-full h-2 transition-all duration-500 {% if job.status == 'running' %}pulse-bar{% endif %}"
+                         id="bar-{{ job.id }}"
+                         style="width: {{ (job.processed / job.total_companies * 100) if job.total_companies > 0 else 0 }}%"></div>
+                </div>
+
+                <!-- Stats -->
+                <div class="grid grid-cols-5 gap-4 text-center">
+                    <div>
+                        <div class="text-lg font-bold text-white" id="processed-{{ job.id }}">{{ job.processed }}</div>
+                        <div class="text-xs text-gray-500">Processed</div>
+                    </div>
+                    <div>
+                        <div class="text-lg font-bold text-white" id="total-{{ job.id }}">{{ job.total_companies }}</div>
+                        <div class="text-xs text-gray-500">Total</div>
+                    </div>
+                    <div>
+                        <div class="text-lg font-bold text-green-400" id="found-{{ job.id }}">{{ job.found_people }}</div>
+                        <div class="text-xs text-gray-500">Found</div>
+                    </div>
+                    <div>
+                        <div class="text-lg font-bold text-accent" id="people-{{ job.id }}">{{ job.total_people }}</div>
+                        <div class="text-xs text-gray-500">People</div>
+                    </div>
+                    <div>
+                        <div class="text-lg font-bold text-gray-300" id="eta-{{ job.id }}">{{ job.eta or '—' }}</div>
+                        <div class="text-xs text-gray-500">ETA</div>
+                    </div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+
+    <!-- Recent Completed -->
+    {% if recent_jobs %}
+    <div>
+        <h3 class="text-lg font-semibold text-white mb-4">Recent Jobs</h3>
+        <div class="bg-dark-300 rounded-xl border border-gray-700/50 overflow-hidden">
+            <table class="w-full text-sm">
+                <thead>
+                    <tr class="border-b border-gray-700/50">
+                        <th class="text-left px-4 py-3 text-gray-400 font-medium">ID</th>
+                        <th class="text-left px-4 py-3 text-gray-400 font-medium">Status</th>
+                        <th class="text-left px-4 py-3 text-gray-400 font-medium">Companies</th>
+                        <th class="text-left px-4 py-3 text-gray-400 font-medium">People Found</th>
+                        <th class="text-left px-4 py-3 text-gray-400 font-medium">Date</th>
+                        <th class="text-left px-4 py-3 text-gray-400 font-medium"></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for job in recent_jobs %}
+                    <tr class="border-b border-gray-700/30 hover:bg-white/[0.02]">
+                        <td class="px-4 py-3 text-white">#{{ job.id }}</td>
+                        <td class="px-4 py-3">
+                            <span class="text-xs px-2 py-0.5 rounded-full {% if job.status == 'done' %}bg-green-500/10 text-green-400{% else %}bg-red-500/10 text-red-400{% endif %}">
+                                {{ job.status }}
+                            </span>
+                            {% if job.error_message %}
+                            <div class="text-xs text-red-400 mt-1 max-w-xs truncate" title="{{ job.error_message }}">{{ job.error_message }}</div>
+                            {% endif %}
+                        </td>
+                        <td class="px-4 py-3 text-gray-300">{{ job.total_companies }}</td>
+                        <td class="px-4 py-3 text-gray-300">{{ job.total_people }}</td>
+                        <td class="px-4 py-3 text-gray-400">{{ job.created_at[:16] if job.created_at else '' }}</td>
+                        <td class="px-4 py-3 flex items-center gap-3">
+                            {% if job.status == 'done' %}
+                            <a href="/results/{{ job.id }}" class="text-accent hover:text-accent-hover text-xs">View</a>
+                            {% endif %}
+                            <form method="POST" action="/api/job/{{ job.id }}/delete" class="inline" onsubmit="return confirm('Delete job #{{ job.id }}?')">
+                                <button class="text-xs text-red-400/60 hover:text-red-400 transition-colors">Delete</button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    {% endif %}
+
+    {% if not active_jobs and not recent_jobs %}
+    <div class="text-center py-16">
+        <svg class="w-16 h-16 text-gray-600 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/></svg>
+        <p class="text-gray-500">No enrichment jobs yet. Connect your Google account above to get started.</p>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// ─── Disconnect Google ───
+async function disconnectGoogle() {
+    if (!confirm('Disconnect your Google account?')) return;
+    await fetch('/api/disconnect-google', {method: 'POST'});
+    location.reload();
+}
+
+{% if google_connected %}
+// ─── Sheet Search & Selection ───
+let sheetsCache = [];
+let searchTimeout = null;
+const searchInput = document.getElementById('sheet-search');
+const dropdown = document.getElementById('sheet-dropdown');
+const sheetIdInput = document.getElementById('sheet-id-input');
+const selectedSheet = document.getElementById('selected-sheet');
+const selectedSheetName = document.getElementById('selected-sheet-name');
+const tabSection = document.getElementById('tab-section');
+const tabSelect = document.getElementById('tab-select');
+const startBtn = document.getElementById('start-btn');
+
+// Load sheets on focus
+searchInput.addEventListener('focus', () => {
+    if (sheetsCache.length === 0) loadSheets('');
+    else renderDropdown(sheetsCache);
+});
+
+searchInput.addEventListener('input', (e) => {
+    clearTimeout(searchTimeout);
+    searchTimeout = setTimeout(() => loadSheets(e.target.value), 300);
+});
+
+// Close dropdown on outside click
+document.addEventListener('click', (e) => {
+    if (!e.target.closest('#sheet-search') && !e.target.closest('#sheet-dropdown')) {
+        dropdown.classList.add('hidden');
+    }
+});
+
+async function loadSheets(query) {
+    dropdown.innerHTML = '<div class="px-4 py-3 text-sm text-gray-400">Loading...</div>';
+    dropdown.classList.remove('hidden');
+    try {
+        const resp = await fetch('/api/sheets?q=' + encodeURIComponent(query));
+        if (resp.status === 401) {
+            dropdown.innerHTML = '<div class="px-4 py-3 text-sm text-red-400">Google connection expired. Please reconnect.</div>';
+            return;
+        }
+        sheetsCache = await resp.json();
+        renderDropdown(sheetsCache);
+    } catch (e) {
+        dropdown.innerHTML = '<div class="px-4 py-3 text-sm text-red-400">Error loading sheets</div>';
+    }
+}
+
+function renderDropdown(sheets) {
+    if (sheets.length === 0) {
+        dropdown.innerHTML = '<div class="px-4 py-3 text-sm text-gray-400">No sheets found</div>';
+        dropdown.classList.remove('hidden');
+        return;
+    }
+    dropdown.innerHTML = sheets.map(s => {
+        const date = s.lastModified ? new Date(s.lastModified).toLocaleDateString() : '';
+        return `<div class="px-4 py-2.5 hover:bg-white/5 cursor-pointer flex items-center justify-between" onclick="selectSheet('${s.id}', '${s.name.replace(/'/g, "\\'")}')">
+            <span class="text-sm text-white truncate">${s.name}</span>
+            <span class="text-xs text-gray-500 ml-3 shrink-0">${date}</span>
+        </div>`;
+    }).join('');
+    dropdown.classList.remove('hidden');
+}
+
+async function selectSheet(id, name) {
+    sheetIdInput.value = id;
+    selectedSheetName.textContent = name;
+    selectedSheet.classList.remove('hidden');
+    searchInput.classList.add('hidden');
+    dropdown.classList.add('hidden');
+
+    // Load tabs
+    tabSection.classList.remove('hidden');
+    tabSelect.innerHTML = '<option value="">Loading tabs...</option>';
+    startBtn.disabled = true;
+
+    try {
+        const resp = await fetch(`/api/sheets/${id}/tabs`);
+        if (resp.status === 401) {
+            tabSelect.innerHTML = '<option value="">Google connection expired</option>';
+            return;
+        }
+        const tabs = await resp.json();
+        tabSelect.innerHTML = tabs.map(t => `<option value="${t}">${t}</option>`).join('');
+        startBtn.disabled = false;
+    } catch (e) {
+        tabSelect.innerHTML = '<option value="">Error loading tabs</option>';
+    }
+}
+
+function clearSheet() {
+    sheetIdInput.value = '';
+    selectedSheet.classList.add('hidden');
+    searchInput.classList.remove('hidden');
+    searchInput.value = '';
+    tabSection.classList.add('hidden');
+    startBtn.disabled = true;
+}
+{% endif %}
+
+// ─── Poll active jobs every 3 seconds ───
+const activeJobs = document.querySelectorAll('[data-job-id]');
+if (activeJobs.length > 0) {
+    setInterval(async () => {
+        for (const el of activeJobs) {
+            const id = el.dataset.jobId;
+            try {
+                const res = await fetch(`/api/job/${id}`);
+                const job = await res.json();
+                const bar = document.getElementById(`bar-${id}`);
+                const pct = job.total_companies > 0 ? (job.processed / job.total_companies * 100) : 0;
+                if (bar) bar.style.width = pct + '%';
+                const ids = ['processed', 'total', 'found', 'people', 'eta'];
+                const vals = [job.processed, job.total_companies, job.found_people, job.total_people, job.eta || '—'];
+                ids.forEach((k, i) => {
+                    const el2 = document.getElementById(`${k}-${id}`);
+                    if (el2) el2.textContent = vals[i];
+                });
+                if (job.status === 'done' || job.status === 'error' || job.status === 'cancelled') {
+                    location.reload();
+                }
+            } catch (e) {}
+        }
+    }, 3000);
+}
+</script>
+{% endblock %}

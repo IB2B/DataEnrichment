@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Results — Intelligent Enrichment{% endblock %}
+{% block content %}
+<div class="p-8 max-w-5xl mx-auto fade-in">
+    <div class="mb-8">
+        <h2 class="text-2xl font-bold text-white">Results</h2>
+        <p class="text-gray-400 text-sm mt-1">View results from previous enrichments</p>
+    </div>
+
+    {% if jobs %}
+    <div class="space-y-3">
+        {% for job in jobs %}
+        <a href="/results/{{ job.id }}" class="block bg-dark-300 rounded-xl border border-gray-700/50 p-5 hover:border-accent/30 transition-colors group">
+            <div class="flex items-center justify-between">
+                <div class="flex-1">
+                    <div class="flex items-center gap-3 mb-2">
+                        <span class="text-white font-medium">Job #{{ job.id }}</span>
+                        <span class="text-xs px-2 py-0.5 rounded-full bg-green-500/10 text-green-400">completed</span>
+                        <span class="text-xs text-gray-500">{{ job.sheet_name }}</span>
+                    </div>
+                    <div class="text-xs text-gray-400 truncate max-w-lg mb-2">{{ job.sheet_url }}</div>
+                    <div class="flex items-center gap-6 text-xs">
+                        <span class="text-gray-400">
+                            <span class="text-white font-medium">{{ job.total_companies }}</span> companies
+                        </span>
+                        <span class="text-gray-400">
+                            <span class="text-green-400 font-medium">{{ job.found_people }}</span> with results
+                        </span>
+                        <span class="text-gray-400">
+                            <span class="text-accent font-medium">{{ job.result_count }}</span> people found
+                        </span>
+                        <span class="text-gray-500">{{ job.finished_at[:16] if job.finished_at else job.created_at[:16] }}</span>
+                    </div>
+                </div>
+                <div class="text-gray-500 group-hover:text-accent transition-colors">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+                </div>
+            </div>
+        </a>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="text-center py-16">
+        <svg class="w-16 h-16 text-gray-600 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+        <p class="text-gray-500">No completed enrichments yet.</p>
+        <a href="/" class="text-accent hover:text-accent-hover text-sm mt-2 inline-block">Start your first enrichment →</a>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,164 @@
+{% extends "base.html" %}
+{% block title %}LinkedIn Scraper — Intelligent Enrichment{% endblock %}
+{% block content %}
+<div class="p-8 max-w-5xl mx-auto fade-in">
+    <div class="mb-8">
+        <h2 class="text-2xl font-bold text-white">LinkedIn Scraper</h2>
+        <p class="text-gray-400 text-sm mt-1">Scrape people from LinkedIn search results</p>
+    </div>
+
+    {% if error %}
+    <div class="bg-red-500/10 border border-red-500/20 rounded-lg px-4 py-3 mb-6">
+        <p class="text-red-400 text-sm">{{ error }}</p>
+        {% if 'verification' in error.lower() or 'checkpoint' in error.lower() or 'manually' in error.lower() %}
+        <p class="text-yellow-400 text-sm mt-2">
+            LinkedIn requires verification. Go to <a href="/settings" class="underline font-semibold text-accent hover:text-accent-hover">Settings &gt; LinkedIn Session</a> to log in manually with a visible browser, then retry.
+        </p>
+        {% endif %}
+    </div>
+    {% endif %}
+
+    <!-- New Scrape -->
+    <div class="bg-dark-300 rounded-xl border border-gray-700/50 p-6 mb-8">
+        <h3 class="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+            <svg class="w-5 h-5 text-accent" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6"/></svg>
+            New Scrape
+        </h3>
+        <form method="POST" action="/api/linkedin/start" class="space-y-4">
+            <div>
+                <label class="text-sm text-gray-300 mb-1 block">LinkedIn People Search URL</label>
+                <input type="url" name="search_url" required
+                    class="w-full bg-dark-400 border border-gray-600 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent"
+                    placeholder="https://www.linkedin.com/search/results/people/?keywords=...">
+                <p class="text-xs text-gray-500 mt-1">Go to LinkedIn, search for people with your filters, then copy the URL</p>
+            </div>
+            <div>
+                <label class="text-sm text-gray-300 mb-1 block">Max Pages</label>
+                <input type="number" name="max_pages" value="10" min="1" max="100"
+                    class="w-32 bg-dark-400 border border-gray-600 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent">
+                <span class="text-xs text-gray-500 ml-2">~10 people per page</span>
+            </div>
+            <button type="submit"
+                class="bg-accent hover:bg-accent-hover text-white font-medium px-6 py-2.5 rounded-lg transition-colors text-sm flex items-center gap-2">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+                Start Scraping
+            </button>
+        </form>
+    </div>
+
+    <!-- Active Scrape -->
+    {% if active %}
+    <div class="mb-8">
+        <h3 class="text-lg font-semibold text-white mb-4">Active Scrape</h3>
+        <div class="bg-dark-300 rounded-xl border border-gray-700/50 p-5" id="active-scrape" data-scrape-id="{{ active.id }}">
+            <div class="flex items-center justify-between mb-3">
+                <div>
+                    <span class="text-sm font-medium text-white">Scrape #{{ active.id }}</span>
+                    <span class="ml-2 text-xs px-2 py-0.5 rounded-full bg-green-500/10 text-green-400">running</span>
+                </div>
+                <form method="POST" action="/api/linkedin/{{ active.id }}/stop" class="inline">
+                    <button class="text-xs text-red-400 hover:text-red-300 transition-colors">Stop</button>
+                </form>
+            </div>
+            <div class="text-xs text-gray-400 mb-3 truncate">{{ active.search_url }}</div>
+            <div class="w-full bg-dark-400 rounded-full h-2 mb-3">
+                <div class="bg-accent rounded-full h-2 transition-all duration-500 pulse-bar" id="li-bar"
+                     style="width: {{ (active.current_page / active.max_pages * 100) if active.max_pages > 0 else 0 }}%"></div>
+            </div>
+            <div class="grid grid-cols-3 gap-4 text-center">
+                <div>
+                    <div class="text-lg font-bold text-white" id="li-page">{{ active.current_page }}</div>
+                    <div class="text-xs text-gray-500">Page</div>
+                </div>
+                <div>
+                    <div class="text-lg font-bold text-green-400" id="li-scraped">{{ active.total_scraped }}</div>
+                    <div class="text-xs text-gray-500">People Found</div>
+                </div>
+                <div>
+                    <div class="text-lg font-bold text-gray-300" id="li-max">{{ active.max_pages }}</div>
+                    <div class="text-xs text-gray-500">Max Pages</div>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    <!-- Past Scrapes -->
+    {% if scrapes %}
+    <div>
+        <h3 class="text-lg font-semibold text-white mb-4">Past Scrapes</h3>
+        <div class="bg-dark-300 rounded-xl border border-gray-700/50 overflow-hidden">
+            <table class="w-full text-sm">
+                <thead>
+                    <tr class="border-b border-gray-700/50">
+                        <th class="text-left px-4 py-3 text-gray-400 font-medium">ID</th>
+                        <th class="text-left px-4 py-3 text-gray-400 font-medium">Status</th>
+                        <th class="text-left px-4 py-3 text-gray-400 font-medium">People</th>
+                        <th class="text-left px-4 py-3 text-gray-400 font-medium">Pages</th>
+                        <th class="text-left px-4 py-3 text-gray-400 font-medium">Date</th>
+                        <th class="text-left px-4 py-3 text-gray-400 font-medium"></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for s in scrapes %}
+                    <tr class="border-b border-gray-700/30 hover:bg-white/[0.02]">
+                        <td class="px-4 py-3 text-white">#{{ s.id }}</td>
+                        <td class="px-4 py-3">
+                            <span class="text-xs px-2 py-0.5 rounded-full {% if s.status == 'done' %}bg-green-500/10 text-green-400{% else %}bg-red-500/10 text-red-400{% endif %}">{{ s.status }}</span>
+                            {% if s.error_message %}
+                            <div class="text-xs text-red-400 mt-1 max-w-xs truncate" title="{{ s.error_message }}">{{ s.error_message }}</div>
+                            {% if 'verification' in s.error_message.lower() or 'checkpoint' in s.error_message.lower() %}
+                            <a href="/settings" class="text-xs text-accent hover:text-accent-hover underline mt-0.5 inline-block">Fix in Settings</a>
+                            {% endif %}
+                            {% endif %}
+                        </td>
+                        <td class="px-4 py-3 text-gray-300">{{ s.total_scraped }}</td>
+                        <td class="px-4 py-3 text-gray-300">{{ s.current_page }}</td>
+                        <td class="px-4 py-3 text-gray-400">{{ s.created_at[:16] if s.created_at else '' }}</td>
+                        <td class="px-4 py-3 flex items-center gap-3">
+                            {% if s.status == 'done' %}
+                            <a href="/linkedin/{{ s.id }}" class="text-accent hover:text-accent-hover text-xs">View</a>
+                            <a href="/linkedin/{{ s.id }}/export" class="text-gray-400 hover:text-white text-xs">CSV</a>
+                            {% endif %}
+                            <form method="POST" action="/api/linkedin/{{ s.id }}/delete" class="inline" onsubmit="return confirm('Delete scrape #{{ s.id }}?')">
+                                <button class="text-xs text-red-400/60 hover:text-red-400 transition-colors">Delete</button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    {% endif %}
+
+    {% if not active and not scrapes %}
+    <div class="text-center py-16">
+        <svg class="w-16 h-16 text-gray-600 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+        <p class="text-gray-500">No LinkedIn scrapes yet. Paste a search URL above to get started.</p>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const el = document.getElementById('active-scrape');
+if (el) {
+    const id = el.dataset.scrapeId;
+    setInterval(async () => {
+        try {
+            const res = await fetch(`/api/linkedin/${id}`);
+            const s = await res.json();
+            document.getElementById('li-page').textContent = s.current_page;
+            document.getElementById('li-scraped').textContent = s.total_scraped;
+            const pct = s.max_pages > 0 ? (s.current_page / s.max_pages * 100) : 0;
+            document.getElementById('li-bar').style.width = pct + '%';
+            if (s.status === 'done' || s.status === 'error' || s.status === 'stopped') {
+                location.reload();
+            }
+        } catch (e) {}
+    }, 3000);
+}
+</script>
+{% endblock %}

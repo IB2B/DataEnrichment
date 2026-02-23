@@ -1,0 +1,165 @@
+{% extends "base.html" %}
+{% block title %}Google Maps Scraper — Intelligent Enrichment{% endblock %}
+{% block content %}
+<div class="p-8 max-w-5xl mx-auto fade-in">
+    <div class="mb-8">
+        <h2 class="text-2xl font-bold text-white">Google Maps Scraper</h2>
+        <p class="text-gray-400 text-sm mt-1">Scrape business info from Google Maps search results</p>
+    </div>
+
+    {% if error %}
+    <div class="bg-red-500/10 border border-red-500/20 rounded-lg px-4 py-3 mb-6">
+        <p class="text-red-400 text-sm">{{ error }}</p>
+    </div>
+    {% endif %}
+
+    <!-- New Scrape -->
+    <div class="bg-dark-300 rounded-xl border border-gray-700/50 p-6 mb-8">
+        <h3 class="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+            <svg class="w-5 h-5 text-accent" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6"/></svg>
+            New Scrape
+        </h3>
+        <form method="POST" action="/api/google-maps/start" class="space-y-4">
+            <div>
+                <label class="text-sm text-gray-300 mb-1 block">Google Maps Search URL</label>
+                <input type="url" name="search_url" required
+                    class="w-full bg-dark-400 border border-gray-600 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent"
+                    placeholder="https://www.google.com/maps/search/restaurants+in+new+york/...">
+                <p class="text-xs text-gray-500 mt-1">Go to Google Maps, search for businesses, then copy the URL from the address bar</p>
+            </div>
+            <div>
+                <label class="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" name="scrape_emails" value="1"
+                        class="w-4 h-4 rounded border-gray-600 bg-dark-400 text-accent focus:ring-accent focus:ring-offset-0">
+                    <span class="text-sm text-gray-300">Also scrape business websites for emails</span>
+                </label>
+                <p class="text-xs text-gray-500 mt-1 ml-6">This will visit each business website to find email addresses (slower)</p>
+            </div>
+            <button type="submit"
+                class="bg-accent hover:bg-accent-hover text-white font-medium px-6 py-2.5 rounded-lg transition-colors text-sm flex items-center gap-2">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+                Start Scraping
+            </button>
+        </form>
+    </div>
+
+    <!-- Active Scrape -->
+    {% if active %}
+    <div class="mb-8">
+        <h3 class="text-lg font-semibold text-white mb-4">Active Scrape</h3>
+        <div class="bg-dark-300 rounded-xl border border-gray-700/50 p-5" id="active-scrape" data-scrape-id="{{ active.id }}">
+            <div class="flex items-center justify-between mb-3">
+                <div>
+                    <span class="text-sm font-medium text-white">Scrape #{{ active.id }}</span>
+                    <span class="ml-2 text-xs px-2 py-0.5 rounded-full bg-green-500/10 text-green-400">running</span>
+                    <span class="ml-2 text-xs text-gray-400" id="gm-phase">
+                        {% if active.total_scraped > 0 %}Extracting...{% else %}Scouting...{% endif %}
+                    </span>
+                </div>
+                <form method="POST" action="/api/google-maps/{{ active.id }}/stop" class="inline">
+                    <button class="text-xs text-red-400 hover:text-red-300 transition-colors">Stop</button>
+                </form>
+            </div>
+            <div class="text-xs text-gray-400 mb-3 truncate">{{ active.search_url }}</div>
+            <div class="w-full bg-dark-400 rounded-full h-2 mb-3">
+                <div class="bg-accent rounded-full h-2 transition-all duration-500 pulse-bar" id="gm-bar"
+                     style="width: {{ (active.total_scraped / active.total_found * 100) if active.total_found > 0 else 5 }}%"></div>
+            </div>
+            <div class="grid grid-cols-2 gap-4 text-center">
+                <div>
+                    <div class="text-lg font-bold text-white" id="gm-found">{{ active.total_found }}</div>
+                    <div class="text-xs text-gray-500">Found</div>
+                </div>
+                <div>
+                    <div class="text-lg font-bold text-green-400" id="gm-scraped">{{ active.total_scraped }}</div>
+                    <div class="text-xs text-gray-500">Extracted</div>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    <!-- Past Scrapes -->
+    {% if scrapes %}
+    <div>
+        <h3 class="text-lg font-semibold text-white mb-4">Past Scrapes</h3>
+        <div class="bg-dark-300 rounded-xl border border-gray-700/50 overflow-hidden">
+            <table class="w-full text-sm">
+                <thead>
+                    <tr class="border-b border-gray-700/50">
+                        <th class="text-left px-4 py-3 text-gray-400 font-medium">ID</th>
+                        <th class="text-left px-4 py-3 text-gray-400 font-medium">Status</th>
+                        <th class="text-left px-4 py-3 text-gray-400 font-medium">Found</th>
+                        <th class="text-left px-4 py-3 text-gray-400 font-medium">Extracted</th>
+                        <th class="text-left px-4 py-3 text-gray-400 font-medium">Emails</th>
+                        <th class="text-left px-4 py-3 text-gray-400 font-medium">Date</th>
+                        <th class="text-left px-4 py-3 text-gray-400 font-medium"></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for s in scrapes %}
+                    <tr class="border-b border-gray-700/30 hover:bg-white/[0.02]">
+                        <td class="px-4 py-3 text-white">#{{ s.id }}</td>
+                        <td class="px-4 py-3">
+                            <span class="text-xs px-2 py-0.5 rounded-full {% if s.status == 'done' %}bg-green-500/10 text-green-400{% elif s.status == 'stopped' %}bg-yellow-500/10 text-yellow-400{% else %}bg-red-500/10 text-red-400{% endif %}">{{ s.status }}</span>
+                            {% if s.error_message %}
+                            <div class="text-xs text-red-400 mt-1 max-w-xs truncate" title="{{ s.error_message }}">{{ s.error_message }}</div>
+                            {% endif %}
+                        </td>
+                        <td class="px-4 py-3 text-gray-300">{{ s.total_found }}</td>
+                        <td class="px-4 py-3 text-gray-300">{{ s.total_scraped }}</td>
+                        <td class="px-4 py-3 text-gray-300">{{ "Yes" if s.scrape_emails else "No" }}</td>
+                        <td class="px-4 py-3 text-gray-400">{{ s.created_at[:16] if s.created_at else '' }}</td>
+                        <td class="px-4 py-3 flex items-center gap-3">
+                            {% if s.status == 'done' or s.total_scraped > 0 %}
+                            <a href="/google-maps/{{ s.id }}" class="text-accent hover:text-accent-hover text-xs">View</a>
+                            <a href="/google-maps/{{ s.id }}/export" class="text-gray-400 hover:text-white text-xs">CSV</a>
+                            {% endif %}
+                            <form method="POST" action="/api/google-maps/{{ s.id }}/delete" class="inline" onsubmit="return confirm('Delete scrape #{{ s.id }}?')">
+                                <button class="text-xs text-red-400/60 hover:text-red-400 transition-colors">Delete</button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    {% endif %}
+
+    {% if not active and not scrapes %}
+    <div class="text-center py-16">
+        <svg class="w-16 h-16 text-gray-600 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+        <p class="text-gray-500">No Google Maps scrapes yet. Paste a search URL above to get started.</p>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const el = document.getElementById('active-scrape');
+if (el) {
+    const id = el.dataset.scrapeId;
+    setInterval(async () => {
+        try {
+            const res = await fetch(`/api/google-maps/${id}`);
+            const s = await res.json();
+            document.getElementById('gm-found').textContent = s.total_found;
+            document.getElementById('gm-scraped').textContent = s.total_scraped;
+            const phase = document.getElementById('gm-phase');
+            if (s.total_scraped > 0) {
+                phase.textContent = 'Extracting...';
+            } else {
+                phase.textContent = 'Scouting...';
+            }
+            const pct = s.total_found > 0 ? (s.total_scraped / s.total_found * 100) : 5;
+            document.getElementById('gm-bar').style.width = Math.max(pct, 5) + '%';
+            if (s.status === 'done' || s.status === 'error' || s.status === 'stopped') {
+                location.reload();
+            }
+        } catch (e) {}
+    }, 3000);
+}
+</script>
+{% endblock %}

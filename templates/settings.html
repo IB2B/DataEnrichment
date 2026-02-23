@@ -1,0 +1,325 @@
+{% extends "base.html" %}
+{% block title %}Settings — Intelligent Enrichment{% endblock %}
+{% block content %}
+<div class="p-8 max-w-2xl mx-auto fade-in">
+    <div class="mb-8">
+        <h2 class="text-2xl font-bold text-white">Settings</h2>
+        <p class="text-gray-400 text-sm mt-1">Configure enrichment and account settings</p>
+    </div>
+
+    {% if msg %}
+    <div class="bg-accent/10 border border-accent/20 rounded-lg px-4 py-3 mb-6">
+        <p class="text-accent text-sm">{{ msg }}</p>
+    </div>
+    {% endif %}
+
+    <!-- Google Account -->
+    <div class="bg-dark-300 rounded-xl border border-gray-700/50 p-6 mb-6">
+        <h3 class="text-lg font-semibold text-white mb-4">Google Account</h3>
+        {% if google_connected %}
+        <div class="flex items-center justify-between bg-dark-400 rounded-lg px-4 py-3">
+            <div class="flex items-center gap-3">
+                <div class="w-8 h-8 rounded-full bg-green-500/20 flex items-center justify-center">
+                    <svg class="w-4 h-4 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+                </div>
+                <div>
+                    <span class="text-sm text-white font-medium">Connected</span>
+                    <div class="text-xs text-gray-400">{{ google_email }}</div>
+                </div>
+            </div>
+            <button onclick="disconnectGoogle()"
+                class="text-xs bg-red-500/10 text-red-400 hover:bg-red-500/20 px-3 py-1.5 rounded-lg transition-colors">
+                Disconnect
+            </button>
+        </div>
+        <p class="text-xs text-gray-500 mt-2">The app uses this Google account to read and write to your spreadsheets.</p>
+        {% else %}
+        <div class="flex items-center gap-3 bg-dark-400 rounded-lg px-4 py-3">
+            <div class="w-8 h-8 rounded-full bg-gray-600/30 flex items-center justify-center">
+                <svg class="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+            </div>
+            <div>
+                <span class="text-sm text-gray-300">Not connected</span>
+                <div class="text-xs text-gray-500">Go to Dashboard to connect your Google account</div>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+
+    <!-- General Settings -->
+    <div class="bg-dark-300 rounded-xl border border-gray-700/50 p-6 mb-6">
+        <h3 class="text-lg font-semibold text-white mb-4">General</h3>
+        <form method="POST" action="/settings/general" class="space-y-4">
+            <div>
+                <label class="text-sm text-gray-300 mb-1 block">Max People per Company</label>
+                <select name="max_people"
+                    class="w-full bg-dark-400 border border-gray-600 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-accent">
+                    {% for n in [1,2,3,4,5,7,10] %}
+                    <option value="{{ n }}" {% if settings.max_people == n|string %}selected{% endif %}>{{ n }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div>
+                <label class="text-sm text-gray-300 mb-1 block">Workers (parallel connections)</label>
+                <select name="workers"
+                    class="w-full bg-dark-400 border border-gray-600 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-accent">
+                    {% for n in [50, 100, 150, 200, 250, 300] %}
+                    <option value="{{ n }}" {% if settings.workers == n|string %}selected{% endif %}>{{ n }}</option>
+                    {% endfor %}
+                </select>
+                <p class="text-xs text-gray-500 mt-1">Higher = faster but more likely to get rate-limited</p>
+            </div>
+            <div>
+                <label class="text-sm text-gray-300 mb-1 block">Default Sheet Tab Name</label>
+                <input type="text" name="default_sheet" value="{{ settings.default_sheet }}"
+                    class="w-full bg-dark-400 border border-gray-600 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-accent">
+            </div>
+            <button type="submit"
+                class="bg-accent hover:bg-accent-hover text-white font-medium px-5 py-2.5 rounded-lg transition-colors text-sm">
+                Save Settings
+            </button>
+        </form>
+    </div>
+
+    <!-- Change Password -->
+    <div class="bg-dark-300 rounded-xl border border-gray-700/50 p-6 mb-6">
+        <h3 class="text-lg font-semibold text-white mb-4">Change Password</h3>
+        <form method="POST" action="/settings/password" class="space-y-4">
+            <div>
+                <label class="text-sm text-gray-300 mb-1 block">Current Password</label>
+                <input type="password" name="current_password" required
+                    class="w-full bg-dark-400 border border-gray-600 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-accent">
+            </div>
+            <div>
+                <label class="text-sm text-gray-300 mb-1 block">New Password</label>
+                <input type="password" name="new_password" required minlength="6"
+                    class="w-full bg-dark-400 border border-gray-600 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-accent">
+            </div>
+            <div>
+                <label class="text-sm text-gray-300 mb-1 block">Confirm New Password</label>
+                <input type="password" name="confirm_password" required minlength="6"
+                    class="w-full bg-dark-400 border border-gray-600 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-accent">
+            </div>
+            <button type="submit"
+                class="bg-gray-600 hover:bg-gray-500 text-white font-medium px-5 py-2.5 rounded-lg transition-colors text-sm">
+                Update Password
+            </button>
+        </form>
+    </div>
+
+    <!-- LinkedIn Credentials -->
+    <div class="bg-dark-300 rounded-xl border border-gray-700/50 p-6 mb-6">
+        <h3 class="text-lg font-semibold text-white mb-4">LinkedIn Scraper</h3>
+        <form method="POST" action="/settings/linkedin" class="space-y-4">
+            <div>
+                <label class="text-sm text-gray-300 mb-1 block">LinkedIn Email</label>
+                <input type="email" name="linkedin_email" value="{{ settings.linkedin_email or '' }}"
+                    class="w-full bg-dark-400 border border-gray-600 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-accent"
+                    placeholder="your-linkedin@email.com">
+            </div>
+            <div>
+                <label class="text-sm text-gray-300 mb-1 block">LinkedIn Password</label>
+                <input type="password" name="linkedin_password" value="{{ settings.linkedin_password or '' }}"
+                    class="w-full bg-dark-400 border border-gray-600 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-accent"
+                    placeholder="&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;">
+            </div>
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="text-sm text-gray-300 mb-1 block">Min Page Delay (seconds)</label>
+                    <input type="number" name="page_delay_min" value="{{ settings.page_delay_min or '3' }}" min="1" max="30" step="0.5"
+                        class="w-full bg-dark-400 border border-gray-600 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-accent">
+                </div>
+                <div>
+                    <label class="text-sm text-gray-300 mb-1 block">Max Page Delay (seconds)</label>
+                    <input type="number" name="page_delay_max" value="{{ settings.page_delay_max or '5' }}" min="2" max="60" step="0.5"
+                        class="w-full bg-dark-400 border border-gray-600 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-accent">
+                </div>
+            </div>
+            <p class="text-xs text-gray-500">Credentials are stored in the database. Higher delays reduce the risk of LinkedIn banning your account.</p>
+            <button type="submit"
+                class="bg-accent hover:bg-accent-hover text-white font-medium px-5 py-2.5 rounded-lg transition-colors text-sm">
+                Save LinkedIn Settings
+            </button>
+        </form>
+    </div>
+
+    <!-- LinkedIn Session -->
+    <div class="bg-dark-300 rounded-xl border border-gray-700/50 p-6 mb-6">
+        <h3 class="text-lg font-semibold text-white mb-4">LinkedIn Session</h3>
+        <p class="text-xs text-gray-500 mb-4">If LinkedIn blocks headless login with a verification challenge, use this to log in manually with a visible browser. The session cookies will be saved and reused for future scrapes.</p>
+
+        <!-- Session status indicator -->
+        <div class="flex items-center gap-3 bg-dark-400 rounded-lg px-4 py-3 mb-4" id="li-session-status">
+            <div class="w-8 h-8 rounded-full bg-gray-600/30 flex items-center justify-center" id="li-session-icon">
+                <svg class="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01"/></svg>
+            </div>
+            <div>
+                <span class="text-sm text-gray-300" id="li-session-label">Checking...</span>
+            </div>
+        </div>
+
+        <!-- Login status text (shown during manual login) -->
+        <div class="bg-dark-400 rounded-lg px-4 py-3 mb-4 hidden" id="li-login-progress">
+            <div class="flex items-center gap-2">
+                <svg class="w-4 h-4 text-accent animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"/></svg>
+                <span class="text-sm text-gray-300" id="li-login-message">Starting...</span>
+            </div>
+        </div>
+
+        <!-- Action buttons -->
+        <div class="flex items-center gap-3">
+            <button onclick="startManualLogin()" id="li-login-btn"
+                class="bg-accent hover:bg-accent-hover text-white font-medium px-5 py-2.5 rounded-lg transition-colors text-sm">
+                Open Browser &amp; Log In
+            </button>
+            <button onclick="clearLinkedInSession()" id="li-clear-btn"
+                class="bg-gray-600 hover:bg-gray-500 text-white font-medium px-4 py-2.5 rounded-lg transition-colors text-sm">
+                Clear Session
+            </button>
+        </div>
+    </div>
+
+    <!-- Service Account Info -->
+    <div class="bg-dark-300 rounded-xl border border-gray-700/50 p-6">
+        <h3 class="text-lg font-semibold text-white mb-4">Service Account (Fallback)</h3>
+        <p class="text-sm text-gray-400 mb-3">
+            Used as a fallback when OAuth is not available. Users must share their sheet with this email.
+        </p>
+        <div class="bg-dark-400 rounded-lg px-4 py-3 flex items-center justify-between">
+            <code class="text-accent text-sm" id="sa-email">Loading...</code>
+            <button onclick="navigator.clipboard.writeText(document.getElementById('sa-email').textContent); this.textContent='Copied!'; setTimeout(()=>this.textContent='Copy',1500)"
+                class="text-xs text-gray-400 hover:text-white transition-colors ml-3">Copy</button>
+        </div>
+        <p class="text-xs text-gray-500 mt-2">This email comes from your enrichmentdata.json credentials file</p>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.getElementById('sa-email').textContent = 'Check enrichmentdata.json → client_email field';
+
+async function disconnectGoogle() {
+    if (!confirm('Disconnect your Google account? You can reconnect from the Dashboard.')) return;
+    await fetch('/api/disconnect-google', {method: 'POST'});
+    location.reload();
+}
+
+// ── LinkedIn Session ──
+let loginPolling = null;
+
+async function checkSessionStatus() {
+    try {
+        const res = await fetch('/api/linkedin/session-status');
+        const data = await res.json();
+        const icon = document.getElementById('li-session-icon');
+        const label = document.getElementById('li-session-label');
+        if (data.has_session) {
+            icon.innerHTML = '<svg class="w-4 h-4 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>';
+            icon.className = 'w-8 h-8 rounded-full bg-green-500/20 flex items-center justify-center';
+            label.textContent = 'Session active — saved cookies found';
+            label.className = 'text-sm text-green-400 font-medium';
+        } else {
+            icon.innerHTML = '<svg class="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>';
+            icon.className = 'w-8 h-8 rounded-full bg-gray-600/30 flex items-center justify-center';
+            label.textContent = 'No session — log in to create one';
+            label.className = 'text-sm text-gray-300';
+        }
+    } catch (e) {}
+}
+
+async function startManualLogin() {
+    const btn = document.getElementById('li-login-btn');
+    btn.disabled = true;
+    btn.textContent = 'Starting...';
+    btn.className = 'bg-gray-600 text-gray-300 font-medium px-5 py-2.5 rounded-lg text-sm cursor-not-allowed';
+
+    try {
+        const res = await fetch('/api/linkedin/manual-login', {method: 'POST'});
+        const data = await res.json();
+        if (!data.ok) {
+            btn.textContent = 'Open Browser & Log In';
+            btn.disabled = false;
+            btn.className = 'bg-accent hover:bg-accent-hover text-white font-medium px-5 py-2.5 rounded-lg transition-colors text-sm';
+            alert(data.error || 'Failed to start');
+            return;
+        }
+    } catch (e) {
+        btn.textContent = 'Open Browser & Log In';
+        btn.disabled = false;
+        btn.className = 'bg-accent hover:bg-accent-hover text-white font-medium px-5 py-2.5 rounded-lg transition-colors text-sm';
+        return;
+    }
+
+    // Show progress and start polling
+    document.getElementById('li-login-progress').classList.remove('hidden');
+    loginPolling = setInterval(async () => {
+        try {
+            const res = await fetch('/api/linkedin/manual-login/status');
+            const data = await res.json();
+            document.getElementById('li-login-message').textContent = data.message || data.status;
+
+            if (data.status === 'done') {
+                clearInterval(loginPolling);
+                document.getElementById('li-login-progress').classList.add('hidden');
+                btn.textContent = 'Open Browser & Log In';
+                btn.disabled = false;
+                btn.className = 'bg-accent hover:bg-accent-hover text-white font-medium px-5 py-2.5 rounded-lg transition-colors text-sm';
+                checkSessionStatus();
+            } else if (data.status === 'error') {
+                clearInterval(loginPolling);
+                document.getElementById('li-login-message').textContent = data.message;
+                btn.textContent = 'Open Browser & Log In';
+                btn.disabled = false;
+                btn.className = 'bg-accent hover:bg-accent-hover text-white font-medium px-5 py-2.5 rounded-lg transition-colors text-sm';
+                // Hide progress after a few seconds
+                setTimeout(() => document.getElementById('li-login-progress').classList.add('hidden'), 5000);
+            }
+        } catch (e) {}
+    }, 2000);
+}
+
+async function clearLinkedInSession() {
+    if (!confirm('Clear saved LinkedIn session? You will need to log in again.')) return;
+    await fetch('/api/linkedin/clear-session', {method: 'POST'});
+    checkSessionStatus();
+}
+
+// Check on page load
+checkSessionStatus();
+
+// Also check if a manual login is still running (from before page load)
+(async function checkStaleLogin() {
+    try {
+        const res = await fetch('/api/linkedin/manual-login/status');
+        const data = await res.json();
+        if (data.status === 'waiting' || data.status === 'opening' || data.status === 'starting') {
+            // A login is in progress — show the progress bar and start polling
+            document.getElementById('li-login-progress').classList.remove('hidden');
+            document.getElementById('li-login-message').textContent = data.message || 'Browser open...';
+            const btn = document.getElementById('li-login-btn');
+            btn.disabled = true;
+            btn.textContent = 'Browser Open...';
+            btn.className = 'bg-gray-600 text-gray-300 font-medium px-5 py-2.5 rounded-lg text-sm cursor-not-allowed';
+            loginPolling = setInterval(async () => {
+                try {
+                    const r = await fetch('/api/linkedin/manual-login/status');
+                    const d = await r.json();
+                    document.getElementById('li-login-message').textContent = d.message || d.status;
+                    if (d.status === 'done' || d.status === 'error' || d.status === 'idle') {
+                        clearInterval(loginPolling);
+                        if (d.status === 'done') document.getElementById('li-login-progress').classList.add('hidden');
+                        if (d.status === 'error') setTimeout(() => document.getElementById('li-login-progress').classList.add('hidden'), 5000);
+                        btn.textContent = 'Open Browser & Log In';
+                        btn.disabled = false;
+                        btn.className = 'bg-accent hover:bg-accent-hover text-white font-medium px-5 py-2.5 rounded-lg transition-colors text-sm';
+                        checkSessionStatus();
+                    }
+                } catch (e) {}
+            }, 2000);
+        }
+        // If status is 'done', 'error', or 'idle' — don't show anything stale
+    } catch (e) {}
+})();
+</script>
+{% endblock %}

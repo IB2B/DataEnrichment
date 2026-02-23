@@ -1,0 +1,137 @@
+{% extends "base.html" %}
+{% block title %}Website Scraper — Intelligent Enrichment{% endblock %}
+{% block content %}
+<div class="p-8 max-w-5xl mx-auto fade-in">
+    <div class="mb-8">
+        <h2 class="text-2xl font-bold text-white">Website Scraper</h2>
+        <p class="text-gray-400 text-sm mt-1">Extract emails, phones, names, and social links from websites</p>
+    </div>
+
+    {% if error %}
+    <div class="bg-red-500/10 border border-red-500/20 rounded-lg px-4 py-3 mb-6">
+        <p class="text-red-400 text-sm">{{ error }}</p>
+    </div>
+    {% endif %}
+
+    <!-- New Scrape -->
+    <div class="bg-dark-300 rounded-xl border border-gray-700/50 p-6 mb-8">
+        <h3 class="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+            <svg class="w-5 h-5 text-accent" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6"/></svg>
+            New Scrape
+        </h3>
+        <form method="POST" action="/api/scraper/start" class="space-y-4">
+            <div>
+                <label class="text-sm text-gray-300 mb-1 block">Website URLs (one per line)</label>
+                <textarea name="urls" rows="6" required
+                    class="w-full bg-dark-400 border border-gray-600 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent font-mono"
+                    placeholder="https://example.com&#10;https://anothersite.it&#10;company-website.com"></textarea>
+                <p class="text-xs text-gray-500 mt-1">The scraper will visit each URL + its contact/about pages to find emails, phones, names, and social links</p>
+            </div>
+            <button type="submit"
+                class="bg-accent hover:bg-accent-hover text-white font-medium px-6 py-2.5 rounded-lg transition-colors text-sm flex items-center gap-2">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+                Start Scraping
+            </button>
+        </form>
+    </div>
+
+    <!-- Active Scrape -->
+    {% if active %}
+    <div class="mb-8">
+        <h3 class="text-lg font-semibold text-white mb-4">Active Scrape</h3>
+        <div class="bg-dark-300 rounded-xl border border-gray-700/50 p-5" id="active-scrape" data-scrape-id="{{ active.id }}">
+            <div class="flex items-center justify-between mb-3">
+                <div>
+                    <span class="text-sm font-medium text-white">Scrape #{{ active.id }}</span>
+                    <span class="ml-2 text-xs px-2 py-0.5 rounded-full bg-green-500/10 text-green-400">running</span>
+                </div>
+            </div>
+            <div class="w-full bg-dark-400 rounded-full h-2 mb-3">
+                <div class="bg-accent rounded-full h-2 transition-all duration-500 pulse-bar" id="ws-bar"
+                     style="width: {{ (active.processed / active.total_urls * 100) if active.total_urls > 0 else 0 }}%"></div>
+            </div>
+            <div class="grid grid-cols-2 gap-4 text-center">
+                <div>
+                    <div class="text-lg font-bold text-white" id="ws-processed">{{ active.processed }}</div>
+                    <div class="text-xs text-gray-500">Processed</div>
+                </div>
+                <div>
+                    <div class="text-lg font-bold text-gray-300" id="ws-total">{{ active.total_urls }}</div>
+                    <div class="text-xs text-gray-500">Total URLs</div>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    <!-- Past Scrapes -->
+    {% if scrapes %}
+    <div>
+        <h3 class="text-lg font-semibold text-white mb-4">Past Scrapes</h3>
+        <div class="bg-dark-300 rounded-xl border border-gray-700/50 overflow-hidden">
+            <table class="w-full text-sm">
+                <thead>
+                    <tr class="border-b border-gray-700/50">
+                        <th class="text-left px-4 py-3 text-gray-400 font-medium">ID</th>
+                        <th class="text-left px-4 py-3 text-gray-400 font-medium">Status</th>
+                        <th class="text-left px-4 py-3 text-gray-400 font-medium">URLs</th>
+                        <th class="text-left px-4 py-3 text-gray-400 font-medium">Date</th>
+                        <th class="text-left px-4 py-3 text-gray-400 font-medium"></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for s in scrapes %}
+                    <tr class="border-b border-gray-700/30 hover:bg-white/[0.02]">
+                        <td class="px-4 py-3 text-white">#{{ s.id }}</td>
+                        <td class="px-4 py-3">
+                            <span class="text-xs px-2 py-0.5 rounded-full {% if s.status == 'done' %}bg-green-500/10 text-green-400{% else %}bg-red-500/10 text-red-400{% endif %}">{{ s.status }}</span>
+                        </td>
+                        <td class="px-4 py-3 text-gray-300">{{ s.total_urls }}</td>
+                        <td class="px-4 py-3 text-gray-400">{{ s.created_at[:16] if s.created_at else '' }}</td>
+                        <td class="px-4 py-3 flex items-center gap-3">
+                            {% if s.status == 'done' %}
+                            <a href="/scraper/{{ s.id }}" class="text-accent hover:text-accent-hover text-xs">View</a>
+                            <a href="/scraper/{{ s.id }}/export" class="text-gray-400 hover:text-white text-xs">CSV</a>
+                            {% endif %}
+                            <form method="POST" action="/api/scraper/{{ s.id }}/delete" class="inline" onsubmit="return confirm('Delete scrape #{{ s.id }}?')">
+                                <button class="text-xs text-red-400/60 hover:text-red-400 transition-colors">Delete</button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    {% endif %}
+
+    {% if not active and not scrapes %}
+    <div class="text-center py-16">
+        <svg class="w-16 h-16 text-gray-600 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9"/></svg>
+        <p class="text-gray-500">No website scrapes yet. Paste URLs above to get started.</p>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const el = document.getElementById('active-scrape');
+if (el) {
+    const id = el.dataset.scrapeId;
+    setInterval(async () => {
+        try {
+            const res = await fetch(`/api/scraper/${id}`);
+            const s = await res.json();
+            document.getElementById('ws-processed').textContent = s.processed;
+            document.getElementById('ws-total').textContent = s.total_urls;
+            const pct = s.total_urls > 0 ? (s.processed / s.total_urls * 100) : 0;
+            document.getElementById('ws-bar').style.width = pct + '%';
+            if (s.status === 'done' || s.status === 'error') {
+                location.reload();
+            }
+        } catch (e) {}
+    }, 3000);
+}
+</script>
+{% endblock %}

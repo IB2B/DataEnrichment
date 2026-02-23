@@ -1,0 +1,131 @@
+{% extends "base.html" %}
+{% block title %}Scrape #{{ scrape.id }} — Website Scraper{% endblock %}
+{% block content %}
+<div class="p-8 max-w-6xl mx-auto fade-in">
+    <div class="mb-6 flex items-center gap-4">
+        <a href="/scraper" class="text-gray-400 hover:text-white transition-colors">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
+        </a>
+        <div>
+            <h2 class="text-2xl font-bold text-white">Scrape #{{ scrape.id }}</h2>
+            <p class="text-gray-400 text-xs mt-1">{{ scrape.total_urls }} URLs processed — {{ scrape.created_at[:16] if scrape.created_at else '' }}</p>
+        </div>
+    </div>
+
+    <!-- Actions -->
+    <div class="flex items-center gap-3 mb-6">
+        <form action="/scraper/{{ scrape.id }}" method="GET" class="flex-1">
+            <input type="text" name="search" value="{{ search }}"
+                class="w-full bg-dark-300 border border-gray-700/50 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-accent"
+                placeholder="Search results...">
+        </form>
+        <a href="/scraper/{{ scrape.id }}/export"
+           class="bg-dark-300 border border-gray-700/50 hover:border-gray-600 text-gray-300 hover:text-white px-4 py-2.5 rounded-lg text-sm transition-colors flex items-center gap-2">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+            Export CSV
+        </a>
+        <form method="POST" action="/api/scraper/{{ scrape.id }}/delete" onsubmit="return confirm('Delete this scrape?')">
+            <button class="bg-red-500/10 border border-red-500/20 text-red-400 hover:bg-red-500/20 px-4 py-2.5 rounded-lg text-sm transition-colors">Delete</button>
+        </form>
+    </div>
+
+    <!-- Results Table -->
+    {% if results %}
+    <div class="bg-dark-300 rounded-xl border border-gray-700/50 overflow-hidden">
+        <div class="overflow-x-auto">
+            <table class="w-full text-sm">
+                <thead>
+                    <tr class="border-b border-gray-700/50">
+                        <th class="text-left px-4 py-3 text-gray-400 font-medium">Logo</th>
+                        <th class="text-left px-4 py-3 text-gray-400 font-medium">URL</th>
+                        <th class="text-left px-4 py-3 text-gray-400 font-medium">Emails</th>
+                        <th class="text-left px-4 py-3 text-gray-400 font-medium">Phones</th>
+                        <th class="text-left px-4 py-3 text-gray-400 font-medium">Names</th>
+                        <th class="text-left px-4 py-3 text-gray-400 font-medium">Social Links</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for r in results %}
+                    <tr class="border-b border-gray-700/30 hover:bg-white/[0.02] align-top">
+                        <td class="px-4 py-3">
+                            {% if r.logo_url %}
+                            <img src="{{ r.logo_url }}" alt="Logo" class="w-8 h-8 object-contain rounded cursor-pointer hover:opacity-80 transition-opacity" onerror="this.style.display='none'" onclick="document.getElementById('logo-modal').classList.remove('hidden');document.getElementById('logo-modal-img').src=this.src">
+                            {% else %}
+                            <span class="text-gray-600 text-xs">—</span>
+                            {% endif %}
+                        </td>
+                        <td class="px-4 py-3 text-accent text-xs max-w-[200px] truncate">
+                            <a href="{{ r.url }}" target="_blank" class="hover:text-accent-hover">{{ r.url }}</a>
+                        </td>
+                        <td class="px-4 py-3 text-gray-300 text-xs max-w-[200px]">
+                            {% for e in r.emails.split(', ') if e %}
+                            <div>{{ e }}</div>
+                            {% endfor %}
+                        </td>
+                        <td class="px-4 py-3 text-gray-300 text-xs max-w-[150px]">
+                            {% for p in r.phones.split(', ') if p %}
+                            <div>{{ p }}</div>
+                            {% endfor %}
+                        </td>
+                        <td class="px-4 py-3 text-gray-300 text-xs max-w-[200px]">
+                            {% for n in r.names.split(', ') if n %}
+                            <div>{{ n }}</div>
+                            {% endfor %}
+                        </td>
+                        <td class="px-4 py-3 text-xs max-w-[200px]">
+                            {% for s in r.social_links.split(', ') if s %}
+                            <div><a href="{{ s }}" target="_blank" class="text-accent hover:text-accent-hover truncate block">{{ s }}</a></div>
+                            {% endfor %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    {% else %}
+    <div class="text-center py-16">
+        <p class="text-gray-500">No results found{% if search %} for "{{ search }}"{% endif %}.</p>
+    </div>
+    {% endif %}
+
+    <!-- Pagination -->
+    {% if total_pages > 1 %}
+    <div class="flex items-center justify-between mt-6">
+        <p class="text-gray-400 text-sm">Showing {{ (current_page - 1) * 10 + 1 }}–{{ [current_page * 10, total] | min }} of {{ total }} results</p>
+        <div class="flex items-center gap-1">
+            {% if current_page > 1 %}
+            <a href="/scraper/{{ scrape.id }}?page={{ current_page - 1 }}{% if search %}&search={{ search }}{% endif %}"
+               class="px-3 py-1.5 text-sm rounded-lg bg-dark-300 border border-gray-700/50 text-gray-300 hover:text-white hover:border-gray-600 transition-colors">&laquo; Prev</a>
+            {% endif %}
+
+            {% for p in range(1, total_pages + 1) %}
+                {% if p == current_page %}
+                <span class="px-3 py-1.5 text-sm rounded-lg bg-accent text-white font-medium">{{ p }}</span>
+                {% elif p == 1 or p == total_pages or (p >= current_page - 2 and p <= current_page + 2) %}
+                <a href="/scraper/{{ scrape.id }}?page={{ p }}{% if search %}&search={{ search }}{% endif %}"
+                   class="px-3 py-1.5 text-sm rounded-lg bg-dark-300 border border-gray-700/50 text-gray-300 hover:text-white hover:border-gray-600 transition-colors">{{ p }}</a>
+                {% elif p == 2 or p == total_pages - 1 %}
+                <span class="px-2 text-gray-500">...</span>
+                {% endif %}
+            {% endfor %}
+
+            {% if current_page < total_pages %}
+            <a href="/scraper/{{ scrape.id }}?page={{ current_page + 1 }}{% if search %}&search={{ search }}{% endif %}"
+               class="px-3 py-1.5 text-sm rounded-lg bg-dark-300 border border-gray-700/50 text-gray-300 hover:text-white hover:border-gray-600 transition-colors">Next &raquo;</a>
+            {% endif %}
+        </div>
+    </div>
+    {% endif %}
+
+    <!-- Logo Modal -->
+    <div id="logo-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm" onclick="this.classList.add('hidden')">
+        <div class="relative bg-dark-300 rounded-xl border border-gray-700/50 p-6 max-w-lg max-h-[80vh] shadow-2xl" onclick="event.stopPropagation()">
+            <button onclick="document.getElementById('logo-modal').classList.add('hidden')" class="absolute top-3 right-3 text-gray-400 hover:text-white transition-colors">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+            </button>
+            <img id="logo-modal-img" src="" alt="Logo" class="max-w-full max-h-[70vh] object-contain rounded">
+        </div>
+    </div>
+</div>
+{% endblock %}

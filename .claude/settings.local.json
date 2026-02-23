@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(py -m pip install:*)",
+      "Bash(python3:*)",
+      "Bash(/c/Users/abder/AppData/Local/Programs/Python/Python313/python.exe:*)",
+      "Bash(tasklist:*)",
+      "Bash(TASKLIST:*)",
+      "Bash(WMIC PROCESS WHERE \"name=''python.exe''\" GET ProcessId,CommandLine)",
+      "Bash(py -m pip show:*)",
+      "Bash(where:*)",
+      "Bash(curl:*)",
+      "Bash(netstat:*)",
+      "Bash(kill:*)",
+      "Bash(cd /c/Users/abder/Downloads/webapp-source/webapp && git add .gitignore && git status 2>&1)",
+      "Bash(cd /c/Users/abder/Downloads/webapp-source/webapp && git add .gitignore .claude/ README.md SETUP_OAUTH.md config.py database.py enrichment_worker.py google_maps_scraper.py image.png linkedin_scraper.py main.py requirements.txt setup.sh templates/ website_scraper.py 2>&1)"
+    ]
+  }
+}

@@ -1,0 +1,150 @@
+{% extends "base.html" %}
+{% block title %}Job #{{ job.id }} Results — Intelligent Enrichment{% endblock %}
+{% block content %}
+<div class="p-8 max-w-7xl mx-auto fade-in">
+    <!-- Header -->
+    <div class="flex items-center justify-between mb-6">
+        <div>
+            <div class="flex items-center gap-3 mb-1">
+                <a href="/results" class="text-gray-400 hover:text-white transition-colors">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
+                </a>
+                <h2 class="text-2xl font-bold text-white">Job #{{ job.id }}</h2>
+            </div>
+            <p class="text-gray-400 text-sm">{{ job.sheet_name }} · {{ total }} people found · {{ job.finished_at[:16] if job.finished_at else '' }}</p>
+        </div>
+        <div class="flex items-center gap-3">
+            <a href="/results/{{ job.id }}/export"
+               class="bg-dark-300 border border-gray-600 hover:border-gray-500 text-gray-300 px-4 py-2 rounded-lg text-sm transition-colors flex items-center gap-2">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+                Export CSV
+            </a>
+            <form method="POST" action="/api/job/{{ job.id }}/delete" onsubmit="return confirm('Delete this job and all results?')">
+                <button class="bg-red-500/10 border border-red-500/20 text-red-400 hover:text-red-300 px-4 py-2 rounded-lg text-sm transition-colors">
+                    Delete
+                </button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Stats cards -->
+    <div class="grid grid-cols-4 gap-4 mb-6">
+        <div class="bg-dark-300 rounded-xl border border-gray-700/50 p-4 text-center">
+            <div class="text-2xl font-bold text-white">{{ job.total_companies }}</div>
+            <div class="text-xs text-gray-500">Companies</div>
+        </div>
+        <div class="bg-dark-300 rounded-xl border border-gray-700/50 p-4 text-center">
+            <div class="text-2xl font-bold text-green-400">{{ job.found_people }}</div>
+            <div class="text-xs text-gray-500">With Results</div>
+        </div>
+        <div class="bg-dark-300 rounded-xl border border-gray-700/50 p-4 text-center">
+            <div class="text-2xl font-bold text-accent">{{ total }}</div>
+            <div class="text-xs text-gray-500">People Found</div>
+        </div>
+        <div class="bg-dark-300 rounded-xl border border-gray-700/50 p-4 text-center">
+            <div class="text-2xl font-bold text-gray-300">{{ job.errors }}</div>
+            <div class="text-xs text-gray-500">Errors</div>
+        </div>
+    </div>
+
+    <!-- Search -->
+    <div class="mb-4">
+        <form method="GET" action="/results/{{ job.id }}" class="flex gap-2">
+            <input type="text" name="search" value="{{ search }}" placeholder="Search by name, email, company, title..."
+                class="flex-1 bg-dark-300 border border-gray-600 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent">
+            <button type="submit" class="bg-accent hover:bg-accent-hover text-white px-5 py-2.5 rounded-lg text-sm transition-colors">Search</button>
+            {% if search %}
+            <a href="/results/{{ job.id }}" class="bg-dark-300 border border-gray-600 text-gray-400 hover:text-white px-4 py-2.5 rounded-lg text-sm transition-colors">Clear</a>
+            {% endif %}
+        </form>
+    </div>
+
+    <!-- Results table -->
+    <div class="bg-dark-300 rounded-xl border border-gray-700/50 overflow-hidden">
+        <div class="overflow-x-auto">
+            <table class="w-full text-sm" id="results-table">
+                <thead>
+                    <tr class="border-b border-gray-700/50">
+                        <th class="text-left px-4 py-3 text-gray-400 font-medium cursor-pointer hover:text-white" onclick="sortTable(0)">Company ↕</th>
+                        <th class="text-left px-4 py-3 text-gray-400 font-medium cursor-pointer hover:text-white" onclick="sortTable(1)">Email ↕</th>
+                        <th class="text-left px-4 py-3 text-gray-400 font-medium cursor-pointer hover:text-white" onclick="sortTable(2)">First Name ↕</th>
+                        <th class="text-left px-4 py-3 text-gray-400 font-medium cursor-pointer hover:text-white" onclick="sortTable(3)">Last Name ↕</th>
+                        <th class="text-left px-4 py-3 text-gray-400 font-medium cursor-pointer hover:text-white" onclick="sortTable(4)">Title ↕</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for r in results %}
+                    <tr class="border-b border-gray-700/30 hover:bg-white/[0.02]">
+                        <td class="px-4 py-3 text-gray-300 max-w-[200px] truncate">{{ r.company_name }}</td>
+                        <td class="px-4 py-3">
+                            {% if r.email %}
+                            <span class="text-accent">{{ r.email }}</span>
+                            {% else %}
+                            <span class="text-gray-600">—</span>
+                            {% endif %}
+                        </td>
+                        <td class="px-4 py-3 text-white">{{ r.first_name }}</td>
+                        <td class="px-4 py-3 text-white">{{ r.last_name }}</td>
+                        <td class="px-4 py-3 text-gray-400 max-w-[200px] truncate">{{ r.title }}</td>
+                    </tr>
+                    {% endfor %}
+                    {% if not results %}
+                    <tr>
+                        <td colspan="5" class="px-4 py-8 text-center text-gray-500">
+                            {% if search %}No results matching "{{ search }}"{% else %}No people found{% endif %}
+                        </td>
+                    </tr>
+                    {% endif %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Pagination -->
+    {% if total_pages > 1 %}
+    <div class="flex items-center justify-between mt-6">
+        <p class="text-gray-400 text-sm">Showing {{ (current_page - 1) * 10 + 1 }}–{{ [current_page * 10, total] | min }} of {{ total }} results</p>
+        <div class="flex items-center gap-1">
+            {% if current_page > 1 %}
+            <a href="/results/{{ job.id }}?page={{ current_page - 1 }}{% if search %}&search={{ search }}{% endif %}"
+               class="px-3 py-1.5 text-sm rounded-lg bg-dark-300 border border-gray-700/50 text-gray-300 hover:text-white hover:border-gray-600 transition-colors">&laquo; Prev</a>
+            {% endif %}
+
+            {% for p in range(1, total_pages + 1) %}
+                {% if p == current_page %}
+                <span class="px-3 py-1.5 text-sm rounded-lg bg-accent text-white font-medium">{{ p }}</span>
+                {% elif p == 1 or p == total_pages or (p >= current_page - 2 and p <= current_page + 2) %}
+                <a href="/results/{{ job.id }}?page={{ p }}{% if search %}&search={{ search }}{% endif %}"
+                   class="px-3 py-1.5 text-sm rounded-lg bg-dark-300 border border-gray-700/50 text-gray-300 hover:text-white hover:border-gray-600 transition-colors">{{ p }}</a>
+                {% elif p == 2 or p == total_pages - 1 %}
+                <span class="px-2 text-gray-500">...</span>
+                {% endif %}
+            {% endfor %}
+
+            {% if current_page < total_pages %}
+            <a href="/results/{{ job.id }}?page={{ current_page + 1 }}{% if search %}&search={{ search }}{% endif %}"
+               class="px-3 py-1.5 text-sm rounded-lg bg-dark-300 border border-gray-700/50 text-gray-300 hover:text-white hover:border-gray-600 transition-colors">Next &raquo;</a>
+            {% endif %}
+        </div>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let sortDir = {};
+function sortTable(colIdx) {
+    const table = document.getElementById('results-table');
+    const tbody = table.querySelector('tbody');
+    const rows = Array.from(tbody.querySelectorAll('tr'));
+    sortDir[colIdx] = !sortDir[colIdx];
+    rows.sort((a, b) => {
+        const aText = (a.children[colIdx]?.textContent || '').trim().toLowerCase();
+        const bText = (b.children[colIdx]?.textContent || '').trim().toLowerCase();
+        return sortDir[colIdx] ? aText.localeCompare(bText) : bText.localeCompare(aText);
+    });
+    rows.forEach(r => tbody.appendChild(r));
+}
+</script>
+{% endblock %}
