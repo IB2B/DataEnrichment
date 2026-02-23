@@ -126,17 +126,50 @@ async def _scout_business_urls(page, search_url, scrape_id):
             await asyncio.sleep(3 * attempt)
     await asyncio.sleep(random.uniform(2, 4))
 
-    # Accept cookies if prompted (multiple languages)
+    # Accept cookies if prompted (language-independent approach)
     try:
-        for btn_text in ["Accept all", "Accetta tutto", "Tout accepter", "Alle akzeptieren", "Aceptar todo"]:
-            consent_btn = page.locator(f'button:has-text("{btn_text}")')
-            if await consent_btn.count() > 0:
-                await consent_btn.first.click()
-                log.info(f"GMaps scrape #{scrape_id} — clicked consent button: {btn_text}")
-                await asyncio.sleep(2)
-                break
-    except Exception:
-        pass
+        if "consent.google" in page.url:
+            # Try clicking the "accept" button by aria-label or form structure
+            # Google consent page has buttons inside forms — the "accept all" is typically
+            # the second form's button, or we can find it by looking for specific attributes
+            accepted = False
+
+            # Method 1: Click button inside the consent form with action containing "save"
+            save_btn = page.locator('form[action*="save"] button, form[action*="consent"] button')
+            if await save_btn.count() > 0:
+                await save_btn.first.click()
+                accepted = True
+
+            # Method 2: Try common button text patterns across languages
+            if not accepted:
+                for btn_text in ["Accept all", "Accetta tutto", "Tout accepter",
+                                 "Alle akzeptieren", "Aceptar todo", "Приемам всички",
+                                 "Aceitar tudo", "Alles accepteren"]:
+                    consent_btn = page.locator(f'button:has-text("{btn_text}")')
+                    if await consent_btn.count() > 0:
+                        await consent_btn.first.click()
+                        accepted = True
+                        break
+
+            # Method 3: Just click the first prominent button on the consent page
+            if not accepted:
+                buttons = page.locator('button')
+                count = await buttons.count()
+                if count > 0:
+                    # Last button is typically "Accept all" on Google consent
+                    await buttons.nth(count - 1).click()
+                    accepted = True
+
+            if accepted:
+                log.info(f"GMaps scrape #{scrape_id} — clicked consent button")
+                await asyncio.sleep(3)
+                # Google may redirect back — wait for Maps to load
+                try:
+                    await page.wait_for_url("**/maps/**", timeout=10000)
+                except Exception:
+                    pass
+    except Exception as exc:
+        log.warning(f"GMaps scrape #{scrape_id} — consent handling error: {exc}")
 
     # Log current URL and page title for debugging
     try:
