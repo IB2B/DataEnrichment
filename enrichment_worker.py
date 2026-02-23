@@ -373,6 +373,20 @@ class ProxyPool:
         return self.proxies[self.idx]
 
 
+def parse_proxy_for_playwright(proxy_url):
+    """Convert 'http://user:pass@host:port' to Playwright proxy dict."""
+    if not proxy_url:
+        return None
+    from urllib.parse import urlparse as _urlparse
+    p = _urlparse(proxy_url)
+    result = {"server": f"{p.scheme}://{p.hostname}:{p.port}"}
+    if p.username:
+        result["username"] = p.username
+    if p.password:
+        result["password"] = p.password
+    return result
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # HTTP FETCH
 # ═══════════════════════════════════════════════════════════════════════════════

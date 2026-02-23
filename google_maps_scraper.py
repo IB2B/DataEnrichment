@@ -10,6 +10,7 @@ from datetime import datetime
 
 import database as db
 from config import GMAPS_DEFAULT_CHUNK_SIZE, GMAPS_DEFAULT_EXTRACT_DELAY
+from enrichment_worker import ProxyPool, parse_proxy_for_playwright
 
 log = logging.getLogger("enrichment.gmaps")
 
@@ -218,14 +219,14 @@ async def _extract_business(page, url):
     return None
 
 
-async def _email_worker(worker_id, pw, job_queue, results_dict, lock, scrape_id):
+async def _email_worker(worker_id, pw, job_queue, results_dict, lock, scrape_id, pp=None):
     """
     Concurrent email worker: launches browser,
     visits business websites to find email addresses.
     """
     browser = None
     try:
-        browser = await pw.chromium.launch(
+        launch_kwargs = dict(
             headless=True,
             args=[
                 "--disable-blink-features=AutomationControlled",
@@ -236,6 +237,11 @@ async def _email_worker(worker_id, pw, job_queue, results_dict, lock, scrape_id)
                 "--disable-notifications",
             ],
         )
+        proxy_dict = parse_proxy_for_playwright(pp.get()) if pp else None
+        if proxy_dict:
+            launch_kwargs["proxy"] = proxy_dict
+
+        browser = await pw.chromium.launch(**launch_kwargs)
         context = await browser.new_context(
             user_agent=random.choice(USER_AGENTS),
             viewport={"width": 1920, "height": 1080},
@@ -309,8 +315,9 @@ async def run_google_maps_scrape(scrape_id: int):
     pw = await async_playwright().start()
 
     try:
-        # ── Single browser, no proxy — for scouting + extracting ──
-        browser = await pw.chromium.launch(
+        # ── Single browser with optional proxy — for scouting + extracting ──
+        pp = ProxyPool()
+        main_launch_kwargs = dict(
             headless=True,
             args=[
                 "--disable-blink-features=AutomationControlled",
@@ -321,6 +328,11 @@ async def run_google_maps_scrape(scrape_id: int):
                 "--disable-notifications",
             ],
         )
+        main_proxy = parse_proxy_for_playwright(pp.get())
+        if main_proxy:
+            main_launch_kwargs["proxy"] = main_proxy
+
+        browser = await pw.chromium.launch(**main_launch_kwargs)
         context = await browser.new_context(
             user_agent=random.choice(USER_AGENTS),
             viewport={"width": 1920, "height": 1080},
@@ -400,7 +412,7 @@ async def run_google_maps_scrape(scrape_id: int):
                 tasks = []
                 for w in range(num_workers):
                     t = asyncio.create_task(
-                        _email_worker(w, pw, job_queue, email_results, lock, scrape_id)
+                        _email_worker(w, pw, job_queue, email_results, lock, scrape_id, pp=pp)
                     )
                     tasks.append(t)
 

@@ -9,6 +9,7 @@ from pathlib import Path
 
 import database as db
 from config import LINKEDIN_COOKIES_DIR, DEFAULT_PAGE_DELAY_MIN, DEFAULT_PAGE_DELAY_MAX
+from enrichment_worker import ProxyPool, parse_proxy_for_playwright
 
 log = logging.getLogger("enrichment.linkedin")
 
@@ -416,7 +417,10 @@ async def run_linkedin_scrape(scrape_id: int):
 
     try:
         ua = random.choice(USER_AGENTS)
-        context = await pw.chromium.launch_persistent_context(
+        pp = ProxyPool()
+        proxy_dict = parse_proxy_for_playwright(pp.get())
+
+        launch_kwargs = dict(
             user_data_dir=str(LINKEDIN_COOKIES_DIR),
             headless=True,
             args=[
@@ -432,6 +436,10 @@ async def run_linkedin_scrape(scrape_id: int):
             viewport={"width": 1920, "height": 1080},
             locale="en-US",
         )
+        if proxy_dict:
+            launch_kwargs["proxy"] = proxy_dict
+
+        context = await pw.chromium.launch_persistent_context(**launch_kwargs)
 
         page = context.pages[0] if context.pages else await context.new_page()
 

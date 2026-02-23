@@ -11,7 +11,7 @@ import aiohttp
 from bs4 import BeautifulSoup
 
 import database as db
-from enrichment_worker import KNOWN_FIRST_NAMES, is_name
+from enrichment_worker import KNOWN_FIRST_NAMES, is_name, ProxyPool
 
 log = logging.getLogger("enrichment.webscraper")
 
@@ -164,13 +164,13 @@ def _find_subpages(soup, base_url):
     return list(links)[:3]
 
 
-async def _fetch_page(session, url, timeout=8):
+async def _fetch_page(session, url, timeout=8, proxy=None):
     headers = {"User-Agent": random.choice(UA_LIST),
                "Accept": "text/html,*/*;q=0.8",
                "Accept-Language": "it-IT,it;q=0.9,en;q=0.7"}
     try:
         async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout),
-                               ssl=False, allow_redirects=True) as resp:
+                               ssl=False, allow_redirects=True, proxy=proxy) as resp:
             if resp.status == 200:
                 text = await resp.text(errors="replace")
                 if len(text) > 300:
@@ -180,15 +180,16 @@ async def _fetch_page(session, url, timeout=8):
     return None
 
 
-async def _scrape_one_url(session, url, scrape_id):
+async def _scrape_one_url(session, url, scrape_id, pp=None):
     """Scrape a single URL + its sub-pages."""
     if not url.startswith("http"):
         url = "https://" + url
 
     all_emails, all_phones, all_names, all_social = set(), set(), set(), set()
     logo_url = ""
+    proxy = pp.get() if pp else None
 
-    soup = await _fetch_page(session, url)
+    soup = await _fetch_page(session, url, proxy=proxy)
     if soup:
         emails, phones, names, social, logo = _extract_from_soup(soup, url)
         all_emails.update(emails)
@@ -201,7 +202,7 @@ async def _scrape_one_url(session, url, scrape_id):
         # Follow sub-pages
         subpages = _find_subpages(soup, url)
         for sub_url in subpages:
-            sub_soup = await _fetch_page(session, sub_url, timeout=6)
+            sub_soup = await _fetch_page(session, sub_url, timeout=6, proxy=pp.get() if pp else None)
             if sub_soup:
                 e, p, n, s, _ = _extract_from_soup(sub_soup, url)
                 all_emails.update(e)
@@ -235,6 +236,7 @@ async def run_website_scrape(scrape_id: int):
     log.info(f"Website scrape #{scrape_id} starting — {total} URLs")
 
     try:
+        pp = ProxyPool()
         connector = aiohttp.TCPConnector(limit=20, limit_per_host=3, ttl_dns_cache=300)
         async with aiohttp.ClientSession(connector=connector) as session:
             sem = asyncio.Semaphore(20)
@@ -242,7 +244,7 @@ async def run_website_scrape(scrape_id: int):
 
             async def bounded(url):
                 async with sem:
-                    return await _scrape_one_url(session, url, scrape_id)
+                    return await _scrape_one_url(session, url, scrape_id, pp=pp)
 
             # Process in batches
             for i in range(0, total, 20):
