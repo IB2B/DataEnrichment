@@ -126,12 +126,22 @@ async def _scout_business_urls(page, search_url, scrape_id):
             await asyncio.sleep(3 * attempt)
     await asyncio.sleep(random.uniform(2, 4))
 
-    # Accept cookies if prompted
+    # Accept cookies if prompted (multiple languages)
     try:
-        consent_btn = page.locator('button:has-text("Accept all")')
-        if await consent_btn.count() > 0:
-            await consent_btn.first.click()
-            await asyncio.sleep(1)
+        for btn_text in ["Accept all", "Accetta tutto", "Tout accepter", "Alle akzeptieren", "Aceptar todo"]:
+            consent_btn = page.locator(f'button:has-text("{btn_text}")')
+            if await consent_btn.count() > 0:
+                await consent_btn.first.click()
+                log.info(f"GMaps scrape #{scrape_id} — clicked consent button: {btn_text}")
+                await asyncio.sleep(2)
+                break
+    except Exception:
+        pass
+
+    # Log current URL and page title for debugging
+    try:
+        title = await page.title()
+        log.info(f"GMaps scrape #{scrape_id} — page after consent: url={page.url[:80]} title={title[:60]}")
     except Exception:
         pass
 
@@ -139,7 +149,12 @@ async def _scout_business_urls(page, search_url, scrape_id):
     try:
         await page.wait_for_selector('div[role="feed"], div.m6QErb', timeout=15000)
     except Exception:
-        log.warning(f"GMaps scrape #{scrape_id} — No results feed found")
+        # Log page content hint for debugging
+        try:
+            snippet = await page.evaluate("document.body.innerText.substring(0, 300)")
+            log.warning(f"GMaps scrape #{scrape_id} — No results feed found. Page snippet: {snippet[:200]}")
+        except Exception:
+            log.warning(f"GMaps scrape #{scrape_id} — No results feed found")
         return []
 
     # Scroll the results panel to load all results
