@@ -535,30 +535,38 @@ def _parse_bing(soup):
     return results
 
 
+_search_available = True  # set to False if search engine is down
+
+
 async def web_search(session, query, pp):
-    """Search using Bing. Returns list of (title, snippet, href)."""
+    """Search using Bing. Returns list of (title, snippet, href). Non-blocking — returns [] on failure."""
+    global _search_available
+    if not _search_available:
+        return []
     url = f"https://www.bing.com/search?q={quote_plus(query)}&count=10"
-    soup = await fetch(session, url, pp, quick=True)
-    if soup:
-        results = _parse_bing(soup)
-        if results:
-            return results
-    # Retry with different proxy
-    soup = await fetch(session, url, pp)
-    if soup:
-        return _parse_bing(soup)
+    try:
+        soup = await asyncio.wait_for(fetch(session, url, pp, quick=True), timeout=8)
+        if soup:
+            results = _parse_bing(soup)
+            if results:
+                return results
+    except asyncio.TimeoutError:
+        pass
+    except Exception:
+        pass
     return []
 
 
 async def _probe_search(session, pp):
-    """Test if Bing search works from this server."""
+    """Test if Bing search works. Non-blocking — sets flag and returns."""
+    global _search_available
     results = await web_search(session, "Microsoft CEO", pp)
     if results:
         log.info(f"Bing search probe: OK ({len(results)} results)")
-        return True
+        _search_available = True
     else:
-        log.error("Bing search probe: FAILED — no results")
-        return False
+        log.warning("Bing search probe: FAILED — search disabled, will use direct scraping only")
+        _search_available = False
 
 
 def _parse_linkedin_people(results):
@@ -719,13 +727,10 @@ async def search_website(session, name, province, pp):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 async def process_one(session, company, pp):
+    cname = company["name"][:30]
     website = company["website"]
-    if not website:
+    if not website and _search_available:
         website = await search_website(session, company["name"], company["province"], pp)
-        if website:
-            log.info(f"[{company['name'][:30]}] Found website via search: {website}")
-        else:
-            log.warning(f"[{company['name'][:30]}] No website found via search")
     url = website if website and website.startswith("http") else (f"https://{website}" if website else "")
     domain = get_domain(url) if url else ""
 
@@ -961,23 +966,29 @@ async def run_enrichment(job_id: int):
 
         async with aiohttp.ClientSession(connector=connector,
                                           timeout=aiohttp.ClientTimeout(total=30)) as session:
-            # Test if Bing search works from this server
-            search_ok = await _probe_search(session, pp)
-            if not search_ok:
-                db.update_job(job_id, status="error",
-                              error_message="Search engine unavailable. Bing blocked from all proxies.",
-                              finished_at=datetime.now().isoformat())
-                return
+            # Test if Bing search works (non-blocking — enrichment continues either way)
+            await _probe_search(session, pp)
+            if _search_available:
+                log.info(f"Job #{job_id} search engine available — full enrichment mode")
+            else:
+                log.info(f"Job #{job_id} search unavailable — website-only scraping mode")
 
             for batch_start in range(0, total, workers * 2):
                 batch = companies[batch_start:batch_start + workers * 2]
+                batch_num = batch_start // (workers * 2) + 1
+                log.info(f"Job #{job_id} batch {batch_num} — processing {len(batch)} companies (total: {processed}/{total})")
                 sem = asyncio.Semaphore(workers)
 
                 async def bounded(c):
                     async with sem:
                         try:
-                            people = await process_one(session, c, pp)
+                            people = await asyncio.wait_for(
+                                process_one(session, c, pp),
+                                timeout=30,
+                            )
                             return c, people, ""
+                        except asyncio.TimeoutError:
+                            return c, [], "timeout"
                         except Exception as e:
                             return c, [], str(e)[:200]
 
@@ -998,6 +1009,8 @@ async def run_enrichment(job_id: int):
                         })
                     if error:
                         errors += 1
+
+                log.info(f"Job #{job_id} batch {batch_num} done — found={found} errors={errors} people={total_people}")
 
                 # Save results to app database
                 if result_batch:
