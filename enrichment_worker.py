@@ -396,13 +396,13 @@ async def fetch(session, url, pp, timeout=DEFAULT_TIMEOUT, quick=False):
             "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
             "Accept-Language": "it-IT,it;q=0.9,en;q=0.7"}
     to = aiohttp.ClientTimeout(total=timeout)
-    attempts = 1 if quick else 2
+    attempts = 1 if quick else 3
     for _ in range(attempts):
         proxy = pp.get()
         try:
             async with session.get(url, headers=hdrs, proxy=proxy, timeout=to,
                                    ssl=False, allow_redirects=True) as r:
-                if r.status == 200:
+                if r.status in (200, 202):
                     text = await r.text(errors="replace")
                     if len(text) > 500:
                         return BeautifulSoup(text, "lxml")
@@ -410,11 +410,12 @@ async def fetch(session, url, pp, timeout=DEFAULT_TIMEOUT, quick=False):
                     return None
         except Exception:
             pass
-    if not quick:
+    # Only fall back to direct (no proxy) if no proxies are configured
+    if not quick and pp.use_direct:
         try:
             async with session.get(url, headers=hdrs, timeout=to,
                                    ssl=False, allow_redirects=True) as r:
-                if r.status == 200:
+                if r.status in (200, 202):
                     text = await r.text(errors="replace")
                     if len(text) > 500:
                         return BeautifulSoup(text, "lxml")
