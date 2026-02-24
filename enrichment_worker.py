@@ -515,79 +515,115 @@ def scrape_emails_and_names(soup, domain=""):
 # LINKEDIN DORKING
 # ═══════════════════════════════════════════════════════════════════════════════
 
-async def _search_ddg(session, query, pp):
-    """Try DuckDuckGo HTML, then Lite as fallback. Returns list of (title, snippet, href)."""
+# ── Search engine abstraction ──
+# At job start, we probe which engine works and cache the result.
+
+_working_engine = None  # "ddg_html", "ddg_lite", "google", or None
+
+
+def _parse_ddg_html(soup):
     results = []
-
-    # Try DDG HTML first
-    url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
-    soup = await fetch(session, url, pp, quick=True)
-    if soup:
-        for result in soup.find_all("div", class_="result")[:10]:
-            title_el = result.find("a", class_="result__a")
-            snippet_el = result.find("a", class_="result__snippet")
-            if not title_el:
-                continue
-            href = title_el.get("href", "")
-            results.append((
-                title_el.get_text(strip=True),
-                snippet_el.get_text(strip=True) if snippet_el else "",
-                href,
-            ))
-        if results:
-            return results
-
-    # Fallback: DDG Lite (more tolerant of datacenter IPs)
-    lite_url = f"https://lite.duckduckgo.com/lite/?q={quote_plus(query)}"
-    soup = await fetch(session, lite_url, pp, quick=True)
-    if soup:
-        # Lite uses a table layout with class="result-link" for links
-        for a in soup.find_all("a", class_="result-link")[:10]:
-            href = a.get("href", "")
-            title = a.get_text(strip=True)
-            # Snippet is in next <td> with class "result-snippet"
-            snippet = ""
-            row = a.find_parent("tr")
-            if row:
-                snip_td = row.find_next_sibling("tr")
-                if snip_td:
-                    snippet = snip_td.get_text(strip=True)
-            results.append((title, snippet, href))
-        if results:
-            return results
-
-    # Fallback: Google search
-    google_url = f"https://www.google.com/search?q={quote_plus(query)}&num=10&hl=en"
-    google_hdrs = {"User-Agent": random.choice(UA),
-                   "Accept": "text/html,*/*;q=0.8",
-                   "Accept-Language": "en-US,en;q=0.9"}
-    to = aiohttp.ClientTimeout(total=DEFAULT_TIMEOUT)
-    for _ in range(2):
-        proxy = pp.get()
-        try:
-            async with session.get(google_url, headers=google_hdrs, proxy=proxy,
-                                   timeout=to, ssl=False, allow_redirects=True) as r:
-                if r.status == 200:
-                    text = await r.text(errors="replace")
-                    if len(text) > 500:
-                        gsoup = BeautifulSoup(text, "lxml")
-                        for div in gsoup.find_all("div", class_="g")[:10]:
-                            a = div.find("a", href=True)
-                            if not a:
-                                continue
-                            href = a.get("href", "")
-                            title = a.get_text(strip=True)
-                            snip_el = div.find("span", class_=re.compile(r"st|aCOpRe"))
-                            if not snip_el:
-                                snip_el = div.find("div", {"data-sncf": True})
-                            snippet = snip_el.get_text(strip=True) if snip_el else ""
-                            results.append((title, snippet, href))
-                        if results:
-                            return results
-        except Exception:
-            pass
-
+    for result in soup.find_all("div", class_="result")[:10]:
+        title_el = result.find("a", class_="result__a")
+        snippet_el = result.find("a", class_="result__snippet")
+        if not title_el:
+            continue
+        results.append((
+            title_el.get_text(strip=True),
+            snippet_el.get_text(strip=True) if snippet_el else "",
+            title_el.get("href", ""),
+        ))
     return results
+
+
+def _parse_ddg_lite(soup):
+    results = []
+    for a in soup.find_all("a", class_="result-link")[:10]:
+        title = a.get_text(strip=True)
+        href = a.get("href", "")
+        snippet = ""
+        row = a.find_parent("tr")
+        if row:
+            snip_td = row.find_next_sibling("tr")
+            if snip_td:
+                snippet = snip_td.get_text(strip=True)
+        results.append((title, snippet, href))
+    return results
+
+
+def _parse_google(soup):
+    results = []
+    for div in soup.find_all("div", class_="g")[:10]:
+        a = div.find("a", href=True)
+        if not a:
+            continue
+        href = a.get("href", "")
+        title = a.get_text(strip=True)
+        snip_el = div.find("span", class_=re.compile(r"st|aCOpRe"))
+        if not snip_el:
+            snip_el = div.find("div", {"data-sncf": True})
+        snippet = snip_el.get_text(strip=True) if snip_el else ""
+        results.append((title, snippet, href))
+    return results
+
+
+async def _probe_search_engines(session, pp):
+    """Test each search engine once and return the name of the first working one."""
+    test_query = "Microsoft CEO"
+
+    engines = [
+        ("ddg_html", f"https://html.duckduckgo.com/html/?q={quote_plus(test_query)}", _parse_ddg_html),
+        ("ddg_lite", f"https://lite.duckduckgo.com/lite/?q={quote_plus(test_query)}", _parse_ddg_lite),
+        ("google", f"https://www.google.com/search?q={quote_plus(test_query)}&num=10&hl=en", _parse_google),
+    ]
+
+    for name, url, parser in engines:
+        soup = await fetch(session, url, pp)
+        if soup:
+            results = parser(soup)
+            if results:
+                log.info(f"Search engine probe: {name} WORKS ({len(results)} results)")
+                return name
+            else:
+                log.warning(f"Search engine probe: {name} returned HTML but no results (CAPTCHA?)")
+        else:
+            log.warning(f"Search engine probe: {name} failed to fetch")
+
+    log.error("Search engine probe: ALL engines failed!")
+    return None
+
+
+async def web_search(session, query, pp):
+    """Search using the working engine (determined at job start). Returns list of (title, snippet, href)."""
+    global _working_engine
+
+    if _working_engine == "ddg_html":
+        url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
+        soup = await fetch(session, url, pp, quick=True)
+        return _parse_ddg_html(soup) if soup else []
+
+    elif _working_engine == "ddg_lite":
+        url = f"https://lite.duckduckgo.com/lite/?q={quote_plus(query)}"
+        soup = await fetch(session, url, pp, quick=True)
+        return _parse_ddg_lite(soup) if soup else []
+
+    elif _working_engine == "google":
+        url = f"https://www.google.com/search?q={quote_plus(query)}&num=10&hl=en"
+        soup = await fetch(session, url, pp, quick=True)
+        return _parse_google(soup) if soup else []
+
+    # No working engine — try all as last resort
+    for engine_url, parser in [
+        (f"https://html.duckduckgo.com/html/?q={quote_plus(query)}", _parse_ddg_html),
+        (f"https://lite.duckduckgo.com/lite/?q={quote_plus(query)}", _parse_ddg_lite),
+        (f"https://www.google.com/search?q={quote_plus(query)}&num=10&hl=en", _parse_google),
+    ]:
+        soup = await fetch(session, engine_url, pp, quick=True)
+        if soup:
+            results = parser(soup)
+            if results:
+                return results
+    return []
 
 
 def _parse_linkedin_people(results):
@@ -633,7 +669,7 @@ async def linkedin_dork(session, company_name, pp):
     if len(clean) < 2:
         return []
     q = f'site:linkedin.com/in "{clean}" ({LINKEDIN_TITLES})'
-    results = await _search_ddg(session, q, pp)
+    results = await web_search(session, q, pp)
     return _parse_linkedin_people(results)
 
 
@@ -729,7 +765,7 @@ def merge_and_match(website_data, linkedin_people, domain):
 
 async def search_website(session, name, province, pp):
     q = f"{name} {province} sito ufficiale" if province else f"{name} sito ufficiale"
-    results = await _search_ddg(session, q, pp)
+    results = await web_search(session, q, pp)
     skip = {"facebook.com", "linkedin.com", "twitter.com", "instagram.com",
             "youtube.com", "paginegialle.it", "wikipedia.org", "amazon.com",
             "duckduckgo.com", "google.com"}
@@ -985,11 +1021,20 @@ async def run_enrichment(job_id: int):
         start = time.time()
         write_batch = []
 
-        connector = aiohttp.TCPConnector(limit=workers * 2, limit_per_host=5,
+        connector = aiohttp.TCPConnector(limit=workers * 2, limit_per_host=50,
                                           ttl_dns_cache=300, enable_cleanup_closed=True)
 
         async with aiohttp.ClientSession(connector=connector,
                                           timeout=aiohttp.ClientTimeout(total=30)) as session:
+            # Probe which search engine works from this server
+            global _working_engine
+            _working_engine = await _probe_search_engines(session, pp)
+            if not _working_engine:
+                db.update_job(job_id, status="error",
+                              error_message="All search engines blocked (DuckDuckGo + Google). Need residential proxies.",
+                              finished_at=datetime.now().isoformat())
+                return
+
             for batch_start in range(0, total, workers * 2):
                 batch = companies[batch_start:batch_start + workers * 2]
                 sem = asyncio.Semaphore(workers)
