@@ -397,19 +397,27 @@ async def fetch(session, url, pp, timeout=DEFAULT_TIMEOUT, quick=False):
             "Accept-Language": "it-IT,it;q=0.9,en;q=0.7"}
     to = aiohttp.ClientTimeout(total=timeout)
     attempts = 1 if quick else 3
-    for _ in range(attempts):
+    is_ddg = "duckduckgo.com" in url
+    for attempt in range(attempts):
         proxy = pp.get()
         try:
             async with session.get(url, headers=hdrs, proxy=proxy, timeout=to,
                                    ssl=False, allow_redirects=True) as r:
+                if is_ddg and attempt == 0:
+                    log.info(f"DDG fetch: status={r.status} proxy={'yes' if proxy else 'direct'} url={url[:80]}")
                 if r.status in (200, 202):
                     text = await r.text(errors="replace")
                     if len(text) > 500:
                         return BeautifulSoup(text, "lxml")
+                    elif is_ddg:
+                        log.warning(f"DDG response too short ({len(text)} chars), status={r.status}")
                 elif r.status in (404, 403, 410, 500, 502, 503):
+                    if is_ddg:
+                        log.warning(f"DDG blocked: status={r.status} proxy={'yes' if proxy else 'direct'}")
                     return None
-        except Exception:
-            pass
+        except Exception as e:
+            if is_ddg and attempt == 0:
+                log.warning(f"DDG fetch error: {type(e).__name__}: {e}")
     # Only fall back to direct (no proxy) if no proxies are configured
     if not quick and pp.use_direct:
         try:
@@ -421,6 +429,8 @@ async def fetch(session, url, pp, timeout=DEFAULT_TIMEOUT, quick=False):
                         return BeautifulSoup(text, "lxml")
         except Exception:
             pass
+    if is_ddg:
+        log.warning(f"DDG fetch FAILED after {attempts} attempts: {url[:80]}")
     return None
 
 
@@ -683,6 +693,10 @@ async def process_one(session, company, pp):
     website = company["website"]
     if not website:
         website = await search_website(session, company["name"], company["province"], pp)
+        if website:
+            log.info(f"[{company['name'][:30]}] Found website via search: {website}")
+        else:
+            log.warning(f"[{company['name'][:30]}] No website found via search")
     url = website if website and website.startswith("http") else (f"https://{website}" if website else "")
     domain = get_domain(url) if url else ""
 
