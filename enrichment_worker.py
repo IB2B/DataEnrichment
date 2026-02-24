@@ -397,27 +397,19 @@ async def fetch(session, url, pp, timeout=DEFAULT_TIMEOUT, quick=False):
             "Accept-Language": "it-IT,it;q=0.9,en;q=0.7"}
     to = aiohttp.ClientTimeout(total=timeout)
     attempts = 1 if quick else 3
-    is_ddg = "duckduckgo.com" in url
     for attempt in range(attempts):
         proxy = pp.get()
         try:
             async with session.get(url, headers=hdrs, proxy=proxy, timeout=to,
                                    ssl=False, allow_redirects=True) as r:
-                if is_ddg and attempt == 0:
-                    log.info(f"DDG fetch: status={r.status} proxy={'yes' if proxy else 'direct'} url={url[:80]}")
                 if r.status in (200, 202):
                     text = await r.text(errors="replace")
                     if len(text) > 500:
                         return BeautifulSoup(text, "lxml")
-                    elif is_ddg:
-                        log.warning(f"DDG response too short ({len(text)} chars), status={r.status}")
                 elif r.status in (404, 403, 410, 500, 502, 503):
-                    if is_ddg:
-                        log.warning(f"DDG blocked: status={r.status} proxy={'yes' if proxy else 'direct'}")
                     return None
-        except Exception as e:
-            if is_ddg and attempt == 0:
-                log.warning(f"DDG fetch error: {type(e).__name__}: {e}")
+        except Exception:
+            pass
     # Only fall back to direct (no proxy) if no proxies are configured
     if not quick and pp.use_direct:
         try:
@@ -429,8 +421,6 @@ async def fetch(session, url, pp, timeout=DEFAULT_TIMEOUT, quick=False):
                         return BeautifulSoup(text, "lxml")
         except Exception:
             pass
-    if is_ddg:
-        log.warning(f"DDG fetch FAILED after {attempts} attempts: {url[:80]}")
     return None
 
 
@@ -525,26 +515,85 @@ def scrape_emails_and_names(soup, domain=""):
 # LINKEDIN DORKING
 # ═══════════════════════════════════════════════════════════════════════════════
 
-async def linkedin_dork(session, company_name, pp):
-    clean = re.sub(r"\b(S\.?R\.?L\.?|S\.?P\.?A\.?|S\.?N\.?C\.?|S\.?A\.?S\.?|S\.?S\.?|"
-                   r"SOCIETA'?\s*(PER\s*AZIONI|A\s*RESPONSABILITA'?\s*LIMITATA)?)\b",
-                   "", company_name, flags=re.I).strip().rstrip(" -.,")
-    clean = re.sub(r"\s+", " ", clean).strip()
-    if len(clean) < 2:
-        return []
-    q = f'site:linkedin.com/in "{clean}" ({LINKEDIN_TITLES})'
-    url = f"https://html.duckduckgo.com/html/?q={quote_plus(q)}"
+async def _search_ddg(session, query, pp):
+    """Try DuckDuckGo HTML, then Lite as fallback. Returns list of (title, snippet, href)."""
+    results = []
+
+    # Try DDG HTML first
+    url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
     soup = await fetch(session, url, pp, quick=True)
-    if not soup:
-        return []
+    if soup:
+        for result in soup.find_all("div", class_="result")[:10]:
+            title_el = result.find("a", class_="result__a")
+            snippet_el = result.find("a", class_="result__snippet")
+            if not title_el:
+                continue
+            href = title_el.get("href", "")
+            results.append((
+                title_el.get_text(strip=True),
+                snippet_el.get_text(strip=True) if snippet_el else "",
+                href,
+            ))
+        if results:
+            return results
+
+    # Fallback: DDG Lite (more tolerant of datacenter IPs)
+    lite_url = f"https://lite.duckduckgo.com/lite/?q={quote_plus(query)}"
+    soup = await fetch(session, lite_url, pp, quick=True)
+    if soup:
+        # Lite uses a table layout with class="result-link" for links
+        for a in soup.find_all("a", class_="result-link")[:10]:
+            href = a.get("href", "")
+            title = a.get_text(strip=True)
+            # Snippet is in next <td> with class "result-snippet"
+            snippet = ""
+            row = a.find_parent("tr")
+            if row:
+                snip_td = row.find_next_sibling("tr")
+                if snip_td:
+                    snippet = snip_td.get_text(strip=True)
+            results.append((title, snippet, href))
+        if results:
+            return results
+
+    # Fallback: Google search
+    google_url = f"https://www.google.com/search?q={quote_plus(query)}&num=10&hl=en"
+    google_hdrs = {"User-Agent": random.choice(UA),
+                   "Accept": "text/html,*/*;q=0.8",
+                   "Accept-Language": "en-US,en;q=0.9"}
+    to = aiohttp.ClientTimeout(total=DEFAULT_TIMEOUT)
+    for _ in range(2):
+        proxy = pp.get()
+        try:
+            async with session.get(google_url, headers=google_hdrs, proxy=proxy,
+                                   timeout=to, ssl=False, allow_redirects=True) as r:
+                if r.status == 200:
+                    text = await r.text(errors="replace")
+                    if len(text) > 500:
+                        gsoup = BeautifulSoup(text, "lxml")
+                        for div in gsoup.find_all("div", class_="g")[:10]:
+                            a = div.find("a", href=True)
+                            if not a:
+                                continue
+                            href = a.get("href", "")
+                            title = a.get_text(strip=True)
+                            snip_el = div.find("span", class_=re.compile(r"st|aCOpRe"))
+                            if not snip_el:
+                                snip_el = div.find("div", {"data-sncf": True})
+                            snippet = snip_el.get_text(strip=True) if snip_el else ""
+                            results.append((title, snippet, href))
+                        if results:
+                            return results
+        except Exception:
+            pass
+
+    return results
+
+
+def _parse_linkedin_people(results):
+    """Parse search results into LinkedIn people entries."""
     people, seen = [], set()
-    for result in soup.find_all("div", class_="result")[:10]:
-        title_el = result.find("a", class_="result__a")
-        snippet_el = result.find("a", class_="result__snippet")
-        if not title_el:
-            continue
-        title_text = title_el.get_text(strip=True)
-        snippet_text = snippet_el.get_text(strip=True) if snippet_el else ""
+    for title_text, snippet_text, href in results:
         combined = f"{title_text} {snippet_text}"
         name, job_title = "", ""
         parts = title_text.replace(" | LinkedIn", "").replace(" - LinkedIn", "").split(" - ")
@@ -574,6 +623,18 @@ async def linkedin_dork(session, company_name, pp):
                 people.append({"first_name": w[0], "last_name": " ".join(w[1:]),
                                "title": job_title[:80], "source": "linkedin"})
     return people[:DEFAULT_MAX_PEOPLE]
+
+
+async def linkedin_dork(session, company_name, pp):
+    clean = re.sub(r"\b(S\.?R\.?L\.?|S\.?P\.?A\.?|S\.?N\.?C\.?|S\.?A\.?S\.?|S\.?S\.?|"
+                   r"SOCIETA'?\s*(PER\s*AZIONI|A\s*RESPONSABILITA'?\s*LIMITATA)?)\b",
+                   "", company_name, flags=re.I).strip().rstrip(" -.,")
+    clean = re.sub(r"\s+", " ", clean).strip()
+    if len(clean) < 2:
+        return []
+    q = f'site:linkedin.com/in "{clean}" ({LINKEDIN_TITLES})'
+    results = await _search_ddg(session, q, pp)
+    return _parse_linkedin_people(results)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -668,14 +729,11 @@ def merge_and_match(website_data, linkedin_people, domain):
 
 async def search_website(session, name, province, pp):
     q = f"{name} {province} sito ufficiale" if province else f"{name} sito ufficiale"
-    soup = await fetch(session, f"https://html.duckduckgo.com/html/?q={quote_plus(q)}", pp)
-    if not soup:
-        return None
+    results = await _search_ddg(session, q, pp)
     skip = {"facebook.com", "linkedin.com", "twitter.com", "instagram.com",
             "youtube.com", "paginegialle.it", "wikipedia.org", "amazon.com",
             "duckduckgo.com", "google.com"}
-    for a in soup.find_all("a", class_="result__a")[:8]:
-        href = a.get("href", "")
+    for title, snippet, href in results[:8]:
         if not href.startswith("http"):
             continue
         d = urlparse(href).netloc.lower().replace("www.", "")
