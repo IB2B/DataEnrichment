@@ -515,115 +515,66 @@ def scrape_emails_and_names(soup, domain=""):
 # LINKEDIN DORKING
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# ── Search engine abstraction ──
-# At job start, we probe which engine works and cache the result.
+# ── Search via duckduckgo-search library (handles anti-bot/tokens) ──
 
-_working_engine = None  # "ddg_html", "ddg_lite", "google", or None
-
-
-def _parse_ddg_html(soup):
-    results = []
-    for result in soup.find_all("div", class_="result")[:10]:
-        title_el = result.find("a", class_="result__a")
-        snippet_el = result.find("a", class_="result__snippet")
-        if not title_el:
-            continue
-        results.append((
-            title_el.get_text(strip=True),
-            snippet_el.get_text(strip=True) if snippet_el else "",
-            title_el.get("href", ""),
-        ))
-    return results
+_ddgs_proxy = None  # Set at job start from ProxyPool
 
 
-def _parse_ddg_lite(soup):
-    results = []
-    for a in soup.find_all("a", class_="result-link")[:10]:
-        title = a.get_text(strip=True)
-        href = a.get("href", "")
-        snippet = ""
-        row = a.find_parent("tr")
-        if row:
-            snip_td = row.find_next_sibling("tr")
-            if snip_td:
-                snippet = snip_td.get_text(strip=True)
-        results.append((title, snippet, href))
-    return results
+def _init_ddgs_proxy(pp):
+    """Pick a proxy for the DDGS library."""
+    global _ddgs_proxy
+    proxy = pp.get()
+    _ddgs_proxy = proxy
+    if proxy:
+        log.info(f"DDGS library using proxy: {proxy[:30]}...")
+    else:
+        log.info("DDGS library using direct connection")
 
 
-def _parse_google(soup):
-    results = []
-    for div in soup.find_all("div", class_="g")[:10]:
-        a = div.find("a", href=True)
-        if not a:
-            continue
-        href = a.get("href", "")
-        title = a.get_text(strip=True)
-        snip_el = div.find("span", class_=re.compile(r"st|aCOpRe"))
-        if not snip_el:
-            snip_el = div.find("div", {"data-sncf": True})
-        snippet = snip_el.get_text(strip=True) if snip_el else ""
-        results.append((title, snippet, href))
-    return results
-
-
-async def _probe_search_engines(session, pp):
-    """Test each search engine once and return the name of the first working one."""
-    test_query = "Microsoft CEO"
-
-    engines = [
-        ("ddg_html", f"https://html.duckduckgo.com/html/?q={quote_plus(test_query)}", _parse_ddg_html),
-        ("ddg_lite", f"https://lite.duckduckgo.com/lite/?q={quote_plus(test_query)}", _parse_ddg_lite),
-        ("google", f"https://www.google.com/search?q={quote_plus(test_query)}&num=10&hl=en", _parse_google),
-    ]
-
-    for name, url, parser in engines:
-        soup = await fetch(session, url, pp)
-        if soup:
-            results = parser(soup)
-            if results:
-                log.info(f"Search engine probe: {name} WORKS ({len(results)} results)")
-                return name
-            else:
-                log.warning(f"Search engine probe: {name} returned HTML but no results (CAPTCHA?)")
-        else:
-            log.warning(f"Search engine probe: {name} failed to fetch")
-
-    log.error("Search engine probe: ALL engines failed!")
-    return None
+def _ddgs_search_sync(query, max_results=10):
+    """Run a DuckDuckGo search using the ddgs library (sync, called from thread)."""
+    from duckduckgo_search import DDGS
+    try:
+        with DDGS(proxy=_ddgs_proxy, timeout=10) as ddgs:
+            results = []
+            for r in ddgs.text(query, max_results=max_results):
+                results.append((
+                    r.get("title", ""),
+                    r.get("body", ""),
+                    r.get("href", ""),
+                ))
+            return results
+    except Exception as e:
+        log.warning(f"DDGS search error: {type(e).__name__}: {e}")
+        return []
 
 
 async def web_search(session, query, pp):
-    """Search using the working engine (determined at job start). Returns list of (title, snippet, href)."""
-    global _working_engine
+    """Search DuckDuckGo using the ddgs library (runs in thread pool to avoid blocking)."""
+    loop = asyncio.get_event_loop()
+    try:
+        results = await asyncio.wait_for(
+            loop.run_in_executor(None, _ddgs_search_sync, query, 10),
+            timeout=15,
+        )
+        return results
+    except asyncio.TimeoutError:
+        log.warning(f"DDGS search timeout for: {query[:60]}")
+        return []
+    except Exception as e:
+        log.warning(f"DDGS search failed: {type(e).__name__}: {e}")
+        return []
 
-    if _working_engine == "ddg_html":
-        url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
-        soup = await fetch(session, url, pp, quick=True)
-        return _parse_ddg_html(soup) if soup else []
 
-    elif _working_engine == "ddg_lite":
-        url = f"https://lite.duckduckgo.com/lite/?q={quote_plus(query)}"
-        soup = await fetch(session, url, pp, quick=True)
-        return _parse_ddg_lite(soup) if soup else []
-
-    elif _working_engine == "google":
-        url = f"https://www.google.com/search?q={quote_plus(query)}&num=10&hl=en"
-        soup = await fetch(session, url, pp, quick=True)
-        return _parse_google(soup) if soup else []
-
-    # No working engine — try all as last resort
-    for engine_url, parser in [
-        (f"https://html.duckduckgo.com/html/?q={quote_plus(query)}", _parse_ddg_html),
-        (f"https://lite.duckduckgo.com/lite/?q={quote_plus(query)}", _parse_ddg_lite),
-        (f"https://www.google.com/search?q={quote_plus(query)}&num=10&hl=en", _parse_google),
-    ]:
-        soup = await fetch(session, engine_url, pp, quick=True)
-        if soup:
-            results = parser(soup)
-            if results:
-                return results
-    return []
+async def _probe_search(session, pp):
+    """Test if DDGS library can search from this server."""
+    results = await web_search(session, "Microsoft CEO", pp)
+    if results:
+        log.info(f"DDGS search probe: OK ({len(results)} results)")
+        return True
+    else:
+        log.error("DDGS search probe: FAILED — no results returned")
+        return False
 
 
 def _parse_linkedin_people(results):
@@ -1026,12 +977,22 @@ async def run_enrichment(job_id: int):
 
         async with aiohttp.ClientSession(connector=connector,
                                           timeout=aiohttp.ClientTimeout(total=30)) as session:
-            # Probe which search engine works from this server
-            global _working_engine
-            _working_engine = await _probe_search_engines(session, pp)
-            if not _working_engine:
+            # Initialize DDGS proxy and test search
+            _init_ddgs_proxy(pp)
+            search_ok = await _probe_search(session, pp)
+            if not search_ok:
+                # Try a different proxy
+                _init_ddgs_proxy(pp)
+                search_ok = await _probe_search(session, pp)
+            if not search_ok:
+                # Try direct (no proxy)
+                global _ddgs_proxy
+                _ddgs_proxy = None
+                log.info("Retrying DDGS probe with direct connection...")
+                search_ok = await _probe_search(session, pp)
+            if not search_ok:
                 db.update_job(job_id, status="error",
-                              error_message="All search engines blocked (DuckDuckGo + Google). Need residential proxies.",
+                              error_message="Search engine unavailable. DuckDuckGo blocked from all proxies and direct.",
                               finished_at=datetime.now().isoformat())
                 return
 
