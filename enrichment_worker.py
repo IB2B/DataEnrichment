@@ -515,65 +515,49 @@ def scrape_emails_and_names(soup, domain=""):
 # LINKEDIN DORKING
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# ── Search via duckduckgo-search library (handles anti-bot/tokens) ──
+# ── Search via Bing (tolerant of datacenter IPs) ──
 
-_ddgs_proxy = None  # Set at job start from ProxyPool
-
-
-def _init_ddgs_proxy(pp):
-    """Pick a proxy for the DDGS library."""
-    global _ddgs_proxy
-    proxy = pp.get()
-    _ddgs_proxy = proxy
-    if proxy:
-        log.info(f"DDGS library using proxy: {proxy[:30]}...")
-    else:
-        log.info("DDGS library using direct connection")
-
-
-def _ddgs_search_sync(query, max_results=10):
-    """Run a DuckDuckGo search using the ddgs library (sync, called from thread)."""
-    from duckduckgo_search import DDGS
-    try:
-        with DDGS(proxy=_ddgs_proxy, timeout=10) as ddgs:
-            results = []
-            for r in ddgs.text(query, max_results=max_results):
-                results.append((
-                    r.get("title", ""),
-                    r.get("body", ""),
-                    r.get("href", ""),
-                ))
-            return results
-    except Exception as e:
-        log.warning(f"DDGS search error: {type(e).__name__}: {e}")
-        return []
+def _parse_bing(soup):
+    """Parse Bing search results page."""
+    results = []
+    for li in soup.find_all("li", class_="b_algo")[:10]:
+        a = li.find("h2")
+        if not a:
+            continue
+        link = a.find("a", href=True)
+        if not link:
+            continue
+        href = link.get("href", "")
+        title = link.get_text(strip=True)
+        snippet_el = li.find("p") or li.find("div", class_="b_caption")
+        snippet = snippet_el.get_text(strip=True) if snippet_el else ""
+        results.append((title, snippet, href))
+    return results
 
 
 async def web_search(session, query, pp):
-    """Search DuckDuckGo using the ddgs library (runs in thread pool to avoid blocking)."""
-    loop = asyncio.get_event_loop()
-    try:
-        results = await asyncio.wait_for(
-            loop.run_in_executor(None, _ddgs_search_sync, query, 10),
-            timeout=15,
-        )
-        return results
-    except asyncio.TimeoutError:
-        log.warning(f"DDGS search timeout for: {query[:60]}")
-        return []
-    except Exception as e:
-        log.warning(f"DDGS search failed: {type(e).__name__}: {e}")
-        return []
+    """Search using Bing. Returns list of (title, snippet, href)."""
+    url = f"https://www.bing.com/search?q={quote_plus(query)}&count=10"
+    soup = await fetch(session, url, pp, quick=True)
+    if soup:
+        results = _parse_bing(soup)
+        if results:
+            return results
+    # Retry with different proxy
+    soup = await fetch(session, url, pp)
+    if soup:
+        return _parse_bing(soup)
+    return []
 
 
 async def _probe_search(session, pp):
-    """Test if DDGS library can search from this server."""
+    """Test if Bing search works from this server."""
     results = await web_search(session, "Microsoft CEO", pp)
     if results:
-        log.info(f"DDGS search probe: OK ({len(results)} results)")
+        log.info(f"Bing search probe: OK ({len(results)} results)")
         return True
     else:
-        log.error("DDGS search probe: FAILED — no results returned")
+        log.error("Bing search probe: FAILED — no results")
         return False
 
 
@@ -977,22 +961,11 @@ async def run_enrichment(job_id: int):
 
         async with aiohttp.ClientSession(connector=connector,
                                           timeout=aiohttp.ClientTimeout(total=30)) as session:
-            # Initialize DDGS proxy and test search
-            _init_ddgs_proxy(pp)
+            # Test if Bing search works from this server
             search_ok = await _probe_search(session, pp)
             if not search_ok:
-                # Try a different proxy
-                _init_ddgs_proxy(pp)
-                search_ok = await _probe_search(session, pp)
-            if not search_ok:
-                # Try direct (no proxy)
-                global _ddgs_proxy
-                _ddgs_proxy = None
-                log.info("Retrying DDGS probe with direct connection...")
-                search_ok = await _probe_search(session, pp)
-            if not search_ok:
                 db.update_job(job_id, status="error",
-                              error_message="Search engine unavailable. DuckDuckGo blocked from all proxies and direct.",
+                              error_message="Search engine unavailable. Bing blocked from all proxies.",
                               finished_at=datetime.now().isoformat())
                 return
 
