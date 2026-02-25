@@ -619,14 +619,13 @@ async def run_linkedin_scrape(scrape_id: int):
         proxy_dict = parse_proxy_for_playwright(pp.get())
         scrapling_proxy_rotator = build_proxy_rotator()
 
-        # Use headed mode (hidden off-screen) so cookies from manual login are shared.
-        # Headless mode uses a different profile and won't see the manual login cookies.
+        # Headless mode — works on VPS without a display.
+        # Both login and scraping use headless so cookies are compatible.
         launch_kwargs = dict(
             user_data_dir=str(LINKEDIN_COOKIES_DIR),
-            headless=False,
+            headless=True,
             args=[
-                "--window-position=-9999,-9999",
-                "--window-size=1,1",
+                "--headless=new",
                 "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
@@ -675,7 +674,7 @@ async def run_linkedin_scrape(scrape_id: int):
 
             if hit_checkpoint:
                 db.update_linkedin_scrape(scrape_id, status="error",
-                    error_message="LinkedIn requires verification. Go to Settings > LinkedIn Session to log in manually with a visible browser, then retry.",
+                    error_message="LinkedIn requires verification (CAPTCHA/2FA). Go to Settings > LinkedIn Session to re-login, then retry. If this persists, wait 24h.",
                     finished_at=datetime.now().isoformat())
                 return
 
@@ -711,7 +710,7 @@ async def run_linkedin_scrape(scrape_id: int):
             post_url = page.url
             if "checkpoint" in post_url or "challenge" in post_url:
                 db.update_linkedin_scrape(scrape_id, status="error",
-                    error_message="LinkedIn requires verification. Go to Settings > LinkedIn Session to log in manually with a visible browser, then retry.",
+                    error_message="LinkedIn requires verification (CAPTCHA/2FA). Go to Settings > LinkedIn Session to re-login, then retry. If this persists, wait 24h.",
                     finished_at=datetime.now().isoformat())
                 return
 
@@ -894,23 +893,46 @@ async def run_linkedin_scrape(scrape_id: int):
 
 async def run_manual_login(status_dict: dict):
     """
-    Opens a headed (visible) browser so the user can log into LinkedIn manually,
-    completing any verification challenges. Saves session cookies on success.
+    Automatic headless LinkedIn login using saved credentials.
+    Works on VPS without a visible browser — logs in with email/password,
+    saves session cookies for the scraper to reuse.
     """
     from playwright.async_api import async_playwright
 
     status_dict["status"] = "opening"
-    status_dict["message"] = "Opening browser..."
+    status_dict["message"] = "Logging in to LinkedIn..."
 
     li_email = db.get_setting("linkedin_email", "")
+    li_password = db.get_setting("linkedin_password", "")
+
+    if not li_email or not li_password:
+        status_dict["status"] = "error"
+        status_dict["message"] = "LinkedIn email and password must be configured in Settings first."
+        return
+
     pw = await async_playwright().start()
 
     try:
         ua = LINKEDIN_UA
+
+        # Clear old cookies to start fresh (avoids stale/incompatible sessions)
+        import shutil
+        cookie_dir = Path(LINKEDIN_COOKIES_DIR)
+        if cookie_dir.exists():
+            for item in cookie_dir.iterdir():
+                try:
+                    if item.is_dir():
+                        shutil.rmtree(item)
+                    else:
+                        item.unlink()
+                except Exception:
+                    pass
+
         context = await pw.chromium.launch_persistent_context(
             user_data_dir=str(LINKEDIN_COOKIES_DIR),
-            headless=False,
+            headless=True,
             args=[
+                "--headless=new",
                 "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
@@ -920,7 +942,7 @@ async def run_manual_login(status_dict: dict):
                 "--disable-notifications",
             ],
             user_agent=ua,
-            viewport={"width": 1280, "height": 900},
+            viewport={"width": 1920, "height": 1080},
             locale="en-US",
         )
 
@@ -935,68 +957,60 @@ async def run_manual_login(status_dict: dict):
         """)
 
         status_dict["status"] = "waiting"
-        status_dict["message"] = "Browser open — please log in to LinkedIn"
+        status_dict["message"] = "Navigating to LinkedIn login page..."
 
         await page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded", timeout=30000)
-        await asyncio.sleep(1)
+        await asyncio.sleep(random.uniform(1, 2))
 
-        # Pre-fill email if available
-        if li_email:
+        # Type email at human speed
+        status_dict["message"] = "Entering credentials..."
+        email_field = page.locator("#username")
+        await email_field.click()
+        for ch in li_email:
+            await email_field.press(ch)
+            await asyncio.sleep(random.uniform(0.02, 0.08))
+        await asyncio.sleep(random.uniform(0.3, 0.6))
+
+        # Type password at human speed
+        pw_field = page.locator("#password")
+        await pw_field.click()
+        for ch in li_password:
+            await pw_field.press(ch)
+            await asyncio.sleep(random.uniform(0.02, 0.08))
+        await asyncio.sleep(random.uniform(0.3, 0.8))
+
+        # Submit
+        status_dict["message"] = "Submitting login..."
+        await page.click("button[type='submit']")
+        await asyncio.sleep(random.uniform(4, 6))
+
+        current_url = page.url
+        log.info(f"Manual login — post-login URL: {current_url}")
+
+        if "/feed" in current_url or ("linkedin.com" in current_url and "/login" not in current_url and "checkpoint" not in current_url and "challenge" not in current_url):
+            status_dict["status"] = "done"
+            status_dict["message"] = "LinkedIn session saved successfully!"
+            log.info("Automatic LinkedIn login successful — cookies saved")
             try:
-                email_field = page.locator("#username")
-                if await email_field.count() > 0:
-                    await email_field.fill(li_email)
+                await context.close()
             except Exception:
                 pass
+            return
 
-        # Poll for login success (up to 5 minutes)
-        timeout_seconds = 300
-        poll_interval = 3
-        elapsed = 0
-
-        while elapsed < timeout_seconds:
-            await asyncio.sleep(poll_interval)
-            elapsed += poll_interval
-
+        if "checkpoint" in current_url or "challenge" in current_url:
+            status_dict["status"] = "error"
+            status_dict["message"] = "LinkedIn requires verification (CAPTCHA/2FA). Try again later or use a different account. If this keeps happening, wait 24h before retrying."
+            log.warning(f"LinkedIn login hit checkpoint: {current_url}")
             try:
-                current_url = page.url
+                await context.close()
             except Exception:
-                # Browser was closed by user
-                status_dict["status"] = "error"
-                status_dict["message"] = "Browser was closed before login completed"
-                return
+                pass
+            return
 
-            # Success: user reached feed or left login/checkpoint pages
-            if "/feed" in current_url:
-                status_dict["status"] = "done"
-                status_dict["message"] = "Session saved successfully"
-                log.info("Manual LinkedIn login successful — cookies saved")
-                try:
-                    await context.close()
-                except Exception:
-                    pass
-                return
-
-            # Still on login/checkpoint — keep waiting
-            if any(x in current_url for x in ["/login", "/uas/", "signin", "checkpoint", "challenge"]):
-                remaining = timeout_seconds - elapsed
-                status_dict["message"] = f"Browser open — please log in to LinkedIn ({remaining}s remaining)"
-                continue
-
-            # User navigated somewhere else on LinkedIn (not feed but not login either) — treat as success
-            if "linkedin.com" in current_url:
-                status_dict["status"] = "done"
-                status_dict["message"] = "Session saved successfully"
-                log.info("Manual LinkedIn login successful — cookies saved")
-                try:
-                    await context.close()
-                except Exception:
-                    pass
-                return
-
-        # Timeout
+        # Still on login page — wrong credentials
         status_dict["status"] = "error"
-        status_dict["message"] = "Login timed out after 5 minutes"
+        status_dict["message"] = "LinkedIn login failed. Check your email and password in Settings."
+        log.warning(f"LinkedIn login failed — still on: {current_url}")
         try:
             await context.close()
         except Exception:
@@ -1004,7 +1018,7 @@ async def run_manual_login(status_dict: dict):
 
     except Exception as e:
         status_dict["status"] = "error"
-        status_dict["message"] = f"Error: {type(e).__name__}: {str(e)}"
+        status_dict["message"] = f"Login error: {type(e).__name__}: {str(e)}"
         log.error(f"Manual login error: {e}")
     finally:
         try:
