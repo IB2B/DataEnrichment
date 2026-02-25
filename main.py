@@ -772,6 +772,78 @@ async def linkedin_session_status(request: Request):
     return JSONResponse({"has_session": has_session})
 
 
+@app.post("/api/linkedin/save-cookie")
+async def save_linkedin_cookie(request: Request):
+    """Save a li_at cookie value to create a LinkedIn session without browser login."""
+    user = get_current_user(request)
+    if not user:
+        raise HTTPException(401)
+    try:
+        body = await request.json()
+        li_at = body.get("li_at", "").strip()
+        if not li_at:
+            return JSONResponse({"ok": False, "error": "Cookie value is empty"})
+
+        from config import LINKEDIN_COOKIES_DIR
+        import json as _json
+
+        # Clear old cookies first
+        if LINKEDIN_COOKIES_DIR.exists():
+            shutil.rmtree(LINKEDIN_COOKIES_DIR, ignore_errors=True)
+        LINKEDIN_COOKIES_DIR.mkdir(parents=True, exist_ok=True)
+
+        # Create a Playwright-compatible persistent context by launching a browser,
+        # injecting the cookie, and closing it so the cookie is persisted to disk.
+        from playwright.async_api import async_playwright
+        pw = await async_playwright().start()
+        try:
+            context = await pw.chromium.launch_persistent_context(
+                user_data_dir=str(LINKEDIN_COOKIES_DIR),
+                headless=True,
+                args=["--headless=new", "--no-sandbox", "--disable-gpu"],
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            )
+            await context.add_cookies([
+                {
+                    "name": "li_at",
+                    "value": li_at,
+                    "domain": ".linkedin.com",
+                    "path": "/",
+                    "httpOnly": True,
+                    "secure": True,
+                    "sameSite": "None",
+                },
+                {
+                    "name": "JSESSIONID",
+                    "value": f"ajax:{li_at[:16]}",
+                    "domain": ".linkedin.com",
+                    "path": "/",
+                    "httpOnly": False,
+                    "secure": True,
+                    "sameSite": "None",
+                },
+            ])
+            # Visit LinkedIn to verify the cookie works
+            page = context.pages[0] if context.pages else await context.new_page()
+            await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=20000)
+            import asyncio as _asyncio
+            await _asyncio.sleep(2)
+            url = page.url
+            await context.close()
+
+            if "/feed" in url or ("linkedin.com" in url and "/login" not in url and "checkpoint" not in url):
+                return JSONResponse({"ok": True})
+            else:
+                # Cookie didn't work — clean up
+                shutil.rmtree(LINKEDIN_COOKIES_DIR, ignore_errors=True)
+                LINKEDIN_COOKIES_DIR.mkdir(exist_ok=True)
+                return JSONResponse({"ok": False, "error": "Cookie is invalid or expired. Please copy a fresh li_at value."})
+        finally:
+            await pw.stop()
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": f"Error: {str(e)}"})
+
+
 @app.post("/api/linkedin/clear-session")
 async def clear_linkedin_session(request: Request):
     """Deletes saved LinkedIn cookies to force re-login."""

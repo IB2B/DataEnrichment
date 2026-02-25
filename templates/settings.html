@@ -146,7 +146,6 @@
     <!-- LinkedIn Session -->
     <div class="bg-dark-300 rounded-xl border border-gray-700/50 p-6 mb-6">
         <h3 class="text-lg font-semibold text-white mb-4">LinkedIn Session</h3>
-        <p class="text-xs text-gray-500 mb-4">If LinkedIn blocks headless login with a verification challenge, use this to log in manually with a visible browser. The session cookies will be saved and reused for future scrapes.</p>
 
         <!-- Session status indicator -->
         <div class="flex items-center gap-3 bg-dark-400 rounded-lg px-4 py-3 mb-4" id="li-session-status">
@@ -158,7 +157,31 @@
             </div>
         </div>
 
-        <!-- Login status text (shown during manual login) -->
+        <!-- Cookie paste method -->
+        <div class="mb-4">
+            <label class="text-sm text-gray-300 mb-1 block">LinkedIn Session Cookie (<code class="text-accent">li_at</code>)</label>
+            <div class="flex gap-2">
+                <input type="text" id="li-cookie-input" placeholder="Paste your li_at cookie value here..."
+                    class="flex-1 bg-dark-400 border border-gray-600 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-accent font-mono">
+                <button onclick="saveCookie()" id="li-cookie-btn"
+                    class="bg-accent hover:bg-accent-hover text-white font-medium px-5 py-2.5 rounded-lg transition-colors text-sm whitespace-nowrap">
+                    Save Session
+                </button>
+            </div>
+            <details class="mt-2">
+                <summary class="text-xs text-gray-500 cursor-pointer hover:text-gray-300">How to get your li_at cookie</summary>
+                <ol class="text-xs text-gray-500 mt-2 ml-4 space-y-1 list-decimal">
+                    <li>Open <a href="https://www.linkedin.com" target="_blank" class="text-accent hover:underline">linkedin.com</a> in your browser and log in normally</li>
+                    <li>Press <kbd class="bg-dark-400 px-1.5 py-0.5 rounded text-gray-300">F12</kbd> to open Developer Tools</li>
+                    <li>Go to the <strong class="text-gray-300">Application</strong> tab (Chrome) or <strong class="text-gray-300">Storage</strong> tab (Firefox)</li>
+                    <li>In the left sidebar, expand <strong class="text-gray-300">Cookies</strong> → click <strong class="text-gray-300">https://www.linkedin.com</strong></li>
+                    <li>Find the cookie named <code class="text-accent">li_at</code> and copy its <strong class="text-gray-300">Value</strong></li>
+                    <li>Paste it above and click Save Session</li>
+                </ol>
+            </details>
+        </div>
+
+        <!-- Login status text (shown during auto login) -->
         <div class="bg-dark-400 rounded-lg px-4 py-3 mb-4 hidden" id="li-login-progress">
             <div class="flex items-center gap-2">
                 <svg class="w-4 h-4 text-accent animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"/></svg>
@@ -169,14 +192,15 @@
         <!-- Action buttons -->
         <div class="flex items-center gap-3">
             <button onclick="startManualLogin()" id="li-login-btn"
-                class="bg-accent hover:bg-accent-hover text-white font-medium px-5 py-2.5 rounded-lg transition-colors text-sm">
-                Open Browser &amp; Log In
+                class="bg-gray-600 hover:bg-gray-500 text-white font-medium px-5 py-2.5 rounded-lg transition-colors text-sm">
+                Auto Login (with credentials)
             </button>
             <button onclick="clearLinkedInSession()" id="li-clear-btn"
                 class="bg-gray-600 hover:bg-gray-500 text-white font-medium px-4 py-2.5 rounded-lg transition-colors text-sm">
                 Clear Session
             </button>
         </div>
+        <p class="text-xs text-gray-500 mt-2">Paste the cookie above (recommended) or use Auto Login which may get blocked by CAPTCHA.</p>
     </div>
 
     <!-- Service Account Info -->
@@ -207,6 +231,42 @@ async function disconnectGoogle() {
 
 // ── LinkedIn Session ──
 let loginPolling = null;
+
+async function saveCookie() {
+    const input = document.getElementById('li-cookie-input');
+    const btn = document.getElementById('li-cookie-btn');
+    const val = input.value.trim();
+    if (!val) { alert('Please paste your li_at cookie value first.'); return; }
+    btn.disabled = true;
+    btn.textContent = 'Saving...';
+    try {
+        const res = await fetch('/api/linkedin/save-cookie', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({li_at: val})
+        });
+        const data = await res.json();
+        if (data.ok) {
+            input.value = '';
+            btn.textContent = 'Saved!';
+            btn.className = 'bg-green-600 text-white font-medium px-5 py-2.5 rounded-lg text-sm whitespace-nowrap';
+            checkSessionStatus();
+            setTimeout(() => {
+                btn.textContent = 'Save Session';
+                btn.className = 'bg-accent hover:bg-accent-hover text-white font-medium px-5 py-2.5 rounded-lg transition-colors text-sm whitespace-nowrap';
+                btn.disabled = false;
+            }, 2000);
+        } else {
+            alert(data.error || 'Failed to save cookie');
+            btn.textContent = 'Save Session';
+            btn.disabled = false;
+        }
+    } catch (e) {
+        alert('Network error');
+        btn.textContent = 'Save Session';
+        btn.disabled = false;
+    }
+}
 
 async function checkSessionStatus() {
     try {
