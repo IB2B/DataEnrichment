@@ -653,6 +653,31 @@ async def run_linkedin_scrape(scrape_id: int):
             window.chrome = { runtime: {} };
         """)
 
+        # Inject li_at cookie from database if available (set via Settings page)
+        li_at_cookie = db.get_setting("linkedin_li_at", "")
+        if li_at_cookie:
+            log.info(f"LinkedIn scrape #{scrape_id} — injecting li_at cookie from Settings")
+            await context.add_cookies([
+                {
+                    "name": "li_at",
+                    "value": li_at_cookie,
+                    "domain": ".linkedin.com",
+                    "path": "/",
+                    "httpOnly": True,
+                    "secure": True,
+                    "sameSite": "None",
+                },
+                {
+                    "name": "JSESSIONID",
+                    "value": f"ajax:{li_at_cookie[:16]}",
+                    "domain": ".linkedin.com",
+                    "path": "/",
+                    "httpOnly": False,
+                    "secure": True,
+                    "sameSite": "None",
+                },
+            ])
+
         # Check if already logged in
         await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=30000)
         await asyncio.sleep(random.uniform(2, 4))
