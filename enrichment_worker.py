@@ -1,6 +1,7 @@
 """
 Enrichment Worker — runs as a background asyncio task
 Adapted from enri3.py to work within the web app
+Uses Scrapling for HTTP fetching and HTML parsing
 """
 
 import re, sys, time, random, asyncio, json, warnings, logging
@@ -8,8 +9,7 @@ from pathlib import Path
 from urllib.parse import urljoin, urlparse, quote_plus
 from datetime import datetime
 
-import aiohttp
-from bs4 import BeautifulSoup
+from scrapling.fetchers import AsyncFetcher, ProxyRotator
 import gspread
 from google.oauth2.service_account import Credentials
 
@@ -273,12 +273,6 @@ LINKEDIN_TITLES = (
     '"Proprietario" OR "Owner" OR "Partner"'
 )
 
-UA = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/119.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
-]
-
 TEAM_KW = re.compile(
     r"chi.siamo|about|team|staff|contatt|contact|azienda|company|persone|people|"
     r"management|leadership|direzione|organizzazione", re.I)
@@ -343,10 +337,27 @@ def get_domain(url):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# PROXY POOL
+# PROXY ROTATOR (Scrapling)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def build_proxy_rotator():
+    """Load proxies from proxies.txt and return a Scrapling ProxyRotator or None."""
+    p = Path(PROXY_FILE)
+    if not p.exists():
+        return None
+    proxies = []
+    for entry in p.read_text().strip().split():
+        parts = entry.strip().split(":")
+        if len(parts) == 4:
+            proxies.append(f"http://{parts[2]}:{parts[3]}@{parts[0]}:{parts[1]}")
+        elif len(parts) == 2:
+            proxies.append(f"http://{parts[0]}:{parts[1]}")
+    return ProxyRotator(proxies) if proxies else None
+
+
 class ProxyPool:
+    """Legacy proxy pool used by linkedin_scraper, google_maps_scraper, website_scraper."""
+
     def __init__(self):
         self.proxies = []
         self.idx = 0
@@ -388,67 +399,75 @@ def parse_proxy_for_playwright(proxy_url):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# HTTP FETCH
+# HTTP FETCH (Scrapling AsyncFetcher)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-async def fetch(session, url, pp, timeout=DEFAULT_TIMEOUT, quick=False):
-    hdrs = {"User-Agent": random.choice(UA),
-            "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
-            "Accept-Language": "it-IT,it;q=0.9,en;q=0.7"}
-    to = aiohttp.ClientTimeout(total=timeout)
+async def fetch(url, proxy_rotator=None, timeout=DEFAULT_TIMEOUT, quick=False):
+    """Fetch URL using Scrapling AsyncFetcher. Returns Response object or None."""
     attempts = 1 if quick else 3
-    for attempt in range(attempts):
-        proxy = pp.get()
+    for _ in range(attempts):
         try:
-            async with session.get(url, headers=hdrs, proxy=proxy, timeout=to,
-                                   ssl=False, allow_redirects=True) as r:
-                if r.status in (200, 202):
-                    text = await r.text(errors="replace")
-                    if len(text) > 500:
-                        return BeautifulSoup(text, "lxml")
-                elif r.status in (404, 403, 410, 500, 502, 503):
-                    return None
+            proxy = proxy_rotator.get_proxy() if proxy_rotator else None
+            page = await AsyncFetcher.get(
+                url,
+                stealthy_headers=True,
+                follow_redirects=True,
+                timeout=timeout,
+                proxy=proxy,
+            )
+            if page.status in (200, 202):
+                return page
+            elif page.status in (404, 403, 410, 500, 502, 503):
+                return None
         except Exception:
             pass
-    # Only fall back to direct (no proxy) if no proxies are configured
-    if not quick and pp.use_direct:
+    # Fallback: try direct (no proxy)
+    if not quick and proxy_rotator:
         try:
-            async with session.get(url, headers=hdrs, timeout=to,
-                                   ssl=False, allow_redirects=True) as r:
-                if r.status in (200, 202):
-                    text = await r.text(errors="replace")
-                    if len(text) > 500:
-                        return BeautifulSoup(text, "lxml")
+            page = await AsyncFetcher.get(
+                url,
+                stealthy_headers=True,
+                follow_redirects=True,
+                timeout=timeout,
+            )
+            if page.status in (200, 202):
+                return page
         except Exception:
             pass
     return None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# WEBSITE SCRAPING
+# WEBSITE SCRAPING (Scrapling selectors)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def scrape_emails_and_names(soup, domain=""):
+def scrape_emails_and_names(page, domain=""):
+    """Extract emails/names/titles from a Scrapling page Response."""
     emails = []
     seen_emails = set()
 
-    for block in soup.find_all(["div", "li", "article"],
-                                class_=re.compile(r"team|member|staff|person|card|profile", re.I)):
-        txt = block.get_text(separator=" ", strip=True)
+    # Phase 1: Structured team/member blocks
+    for block in page.css(
+        'div[class*="team"], div[class*="member"], div[class*="staff"], '
+        'div[class*="person"], div[class*="card"], div[class*="profile"], '
+        'li[class*="team"], li[class*="member"], li[class*="staff"], '
+        'article[class*="team"], article[class*="member"]'
+    ):
+        txt = block.get_all_text(strip=True)
         if len(txt) < 5 or len(txt) > 500:
             continue
         name = ""
-        for h in block.find_all(["h2", "h3", "h4", "h5", "strong", "b", "span"]):
-            if is_name(h.get_text(strip=True)):
-                name = h.get_text(strip=True)
+        for h in block.css('h2, h3, h4, h5, strong, b, span'):
+            h_text = h.text.strip() if h.text else ""
+            if is_name(h_text):
+                name = h_text
                 break
         email = ""
-        for a in block.find_all("a", href=True):
-            if a["href"].startswith("mailto:"):
-                e = a["href"].replace("mailto:", "").split("?")[0].strip().lower()
-                if ok_email(e, domain):
-                    email = e
-                    break
+        for a in block.css('a[href^="mailto:"]'):
+            e = a.attrib.get('href', '').replace('mailto:', '').split('?')[0].strip().lower()
+            if ok_email(e, domain):
+                email = e
+                break
         if not email:
             for e in EMAIL_RE.findall(txt):
                 if ok_email(e.lower(), domain):
@@ -459,13 +478,19 @@ def scrape_emails_and_names(soup, domain=""):
             seen_emails.add(email)
             emails.append({"email": email, "name": name, "title": title})
 
-    for h in soup.find_all(["h2", "h3", "h4", "h5", "strong", "b"]):
-        ht = h.get_text(strip=True)
+    # Phase 2: Name headings with nearby emails
+    for h in page.css('h2, h3, h4, h5, strong, b'):
+        ht = h.text.strip() if h.text else ""
         if not is_name(ht):
             continue
         email, title = "", ""
-        for sib in h.find_next_siblings()[:3]:
-            st = sib.get_text(strip=True)
+        # Check siblings (next elements)
+        sib = h.next
+        checked = 0
+        while sib and checked < 3:
+            st = sib.text.strip() if sib.text else ""
+            if not st:
+                st = sib.get_all_text(strip=True) if hasattr(sib, 'get_all_text') else ""
             if not title:
                 title = find_title_text(st)
             if not email:
@@ -473,8 +498,11 @@ def scrape_emails_and_names(soup, domain=""):
                     if ok_email(e.lower(), domain):
                         email = e.lower()
                         break
+            sib = sib.next
+            checked += 1
+        # Check parent
         if h.parent:
-            pt = h.parent.get_text(separator=" ", strip=True)
+            pt = h.parent.get_all_text(strip=True)
             if not title:
                 title = find_title_text(pt)
             if not email:
@@ -488,20 +516,21 @@ def scrape_emails_and_names(soup, domain=""):
         elif not email and ht:
             emails.append({"email": "", "name": ht, "title": title})
 
-    for a in soup.find_all("a", href=True):
-        if not a["href"].startswith("mailto:"):
-            continue
-        email = a["href"].replace("mailto:", "").split("?")[0].strip().lower()
+    # Phase 3: Mailto links
+    for a in page.css('a[href^="mailto:"]'):
+        email = a.attrib.get('href', '').replace('mailto:', '').split('?')[0].strip().lower()
         if not ok_email(email, domain) or email in seen_emails:
             continue
-        name = a.get_text(strip=True)
+        name = a.text.strip() if a.text else ""
         if not is_name(name):
             name = ""
-        title = find_title_text(a.parent.get_text(separator=" ", strip=True)) if a.parent else ""
+        parent_text = a.parent.get_all_text(strip=True) if a.parent else ""
+        title = find_title_text(parent_text)
         seen_emails.add(email)
         emails.append({"email": email, "name": name, "title": title})
 
-    full_text = soup.get_text(separator=" ")
+    # Phase 4: Full page email regex scan
+    full_text = page.get_all_text()
     for e in EMAIL_RE.findall(full_text):
         e = e.lower()
         if ok_email(e, domain) and e not in seen_emails:
@@ -512,25 +541,25 @@ def scrape_emails_and_names(soup, domain=""):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# LINKEDIN DORKING
+# SEARCH ENGINE (Bing)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# ── Search via Bing (tolerant of datacenter IPs) ──
-
-def _parse_bing(soup):
-    """Parse Bing search results page."""
+def _parse_bing(page):
+    """Parse Bing search results from a Scrapling page."""
     results = []
-    for li in soup.find_all("li", class_="b_algo")[:10]:
-        a = li.find("h2")
-        if not a:
+    for li in page.css('li.b_algo')[:10]:
+        h2 = li.css_first('h2')
+        if not h2:
             continue
-        link = a.find("a", href=True)
+        link = h2.css_first('a[href]')
         if not link:
             continue
-        href = link.get("href", "")
-        title = link.get_text(strip=True)
-        snippet_el = li.find("p") or li.find("div", class_="b_caption")
-        snippet = snippet_el.get_text(strip=True) if snippet_el else ""
+        href = link.attrib.get('href', '')
+        title = link.text.strip() if link.text else ""
+        snippet_el = li.css_first('p') or li.css_first('div.b_caption')
+        snippet = snippet_el.text.strip() if snippet_el and snippet_el.text else ""
+        if not snippet and snippet_el:
+            snippet = snippet_el.get_all_text(strip=True)
         results.append((title, snippet, href))
     return results
 
@@ -538,16 +567,16 @@ def _parse_bing(soup):
 _search_available = True  # set to False if search engine is down
 
 
-async def web_search(session, query, pp):
+async def web_search(query, proxy_rotator):
     """Search using Bing. Returns list of (title, snippet, href). Non-blocking — returns [] on failure."""
     global _search_available
     if not _search_available:
         return []
     url = f"https://www.bing.com/search?q={quote_plus(query)}&count=10"
     try:
-        soup = await asyncio.wait_for(fetch(session, url, pp, quick=True), timeout=8)
-        if soup:
-            results = _parse_bing(soup)
+        page = await asyncio.wait_for(fetch(url, proxy_rotator, quick=True), timeout=8)
+        if page:
+            results = _parse_bing(page)
             if results:
                 return results
     except asyncio.TimeoutError:
@@ -557,10 +586,10 @@ async def web_search(session, query, pp):
     return []
 
 
-async def _probe_search(session, pp):
+async def _probe_search(proxy_rotator):
     """Test if Bing search works. Non-blocking — sets flag and returns."""
     global _search_available
-    results = await web_search(session, "Microsoft CEO", pp)
+    results = await web_search("Microsoft CEO", proxy_rotator)
     if results:
         log.info(f"Bing search probe: OK ({len(results)} results)")
         _search_available = True
@@ -568,6 +597,10 @@ async def _probe_search(session, pp):
         log.warning("Bing search probe: FAILED — search disabled, will use direct scraping only")
         _search_available = False
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LINKEDIN DORKING
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def _parse_linkedin_people(results):
     """Parse search results into LinkedIn people entries."""
@@ -604,7 +637,7 @@ def _parse_linkedin_people(results):
     return people[:DEFAULT_MAX_PEOPLE]
 
 
-async def linkedin_dork(session, company_name, pp):
+async def linkedin_dork(company_name, proxy_rotator):
     clean = re.sub(r"\b(S\.?R\.?L\.?|S\.?P\.?A\.?|S\.?N\.?C\.?|S\.?A\.?S\.?|S\.?S\.?|"
                    r"SOCIETA'?\s*(PER\s*AZIONI|A\s*RESPONSABILITA'?\s*LIMITATA)?)\b",
                    "", company_name, flags=re.I).strip().rstrip(" -.,")
@@ -612,7 +645,7 @@ async def linkedin_dork(session, company_name, pp):
     if len(clean) < 2:
         return []
     q = f'site:linkedin.com/in "{clean}" ({LINKEDIN_TITLES})'
-    results = await web_search(session, q, pp)
+    results = await web_search(q, proxy_rotator)
     return _parse_linkedin_people(results)
 
 
@@ -706,9 +739,9 @@ def merge_and_match(website_data, linkedin_people, domain):
 # SEARCH WEBSITE
 # ═══════════════════════════════════════════════════════════════════════════════
 
-async def search_website(session, name, province, pp):
+async def search_website(name, province, proxy_rotator):
     q = f"{name} {province} sito ufficiale" if province else f"{name} sito ufficiale"
-    results = await web_search(session, q, pp)
+    results = await web_search(q, proxy_rotator)
     skip = {"facebook.com", "linkedin.com", "twitter.com", "instagram.com",
             "youtube.com", "paginegialle.it", "wikipedia.org", "amazon.com",
             "duckduckgo.com", "google.com"}
@@ -726,11 +759,11 @@ async def search_website(session, name, province, pp):
 # PROCESS ONE COMPANY
 # ═══════════════════════════════════════════════════════════════════════════════
 
-async def process_one(session, company, pp):
+async def process_one(company, proxy_rotator):
     cname = company["name"][:30]
     website = company["website"]
     if not website and _search_available:
-        website = await search_website(session, company["name"], company["province"], pp)
+        website = await search_website(company["name"], company["province"], proxy_rotator)
     url = website if website and website.startswith("http") else (f"https://{website}" if website else "")
     domain = get_domain(url) if url else ""
 
@@ -738,16 +771,18 @@ async def process_one(session, company, pp):
         if not url:
             return []
         all_data = []
-        soup = await fetch(session, url, pp)
-        if not soup:
+        page = await fetch(url, proxy_rotator)
+        if not page:
             return []
-        all_data.extend(scrape_emails_and_names(soup, domain))
+        all_data.extend(scrape_emails_and_names(page, domain))
         has_email = any(d["email"] for d in all_data)
         found_links = set()
-        for a in soup.find_all("a", href=True):
-            href = a["href"]
-            text = a.get_text(strip=True).lower()
-            if TEAM_KW.search(text) or TEAM_KW.search(href):
+        for a in page.css('a[href]'):
+            href = a.attrib.get('href', '')
+            a_text = a.text.strip().lower() if a.text else ""
+            if not a_text:
+                a_text = a.get_all_text(strip=True).lower()
+            if TEAM_KW.search(a_text) or TEAM_KW.search(href):
                 if href.startswith("/"):
                     href = urljoin(url.rstrip("/") + "/", href)
                 elif not href.startswith("http"):
@@ -755,19 +790,19 @@ async def process_one(session, company, pp):
                 if domain and domain in href.lower():
                     found_links.add(href)
         for link in list(found_links)[:2]:
-            soup2 = await fetch(session, link, pp, quick=True)
-            if soup2:
-                all_data.extend(scrape_emails_and_names(soup2, domain))
+            page2 = await fetch(link, proxy_rotator, quick=True)
+            if page2:
+                all_data.extend(scrape_emails_and_names(page2, domain))
             await asyncio.sleep(0.05)
         if not found_links and not has_email:
             for path in ["/chi-siamo", "/contatti"]:
-                s = await fetch(session, urljoin(url.rstrip("/") + "/", path), pp, quick=True)
+                s = await fetch(urljoin(url.rstrip("/") + "/", path), proxy_rotator, quick=True)
                 if s:
                     all_data.extend(scrape_emails_and_names(s, domain))
         return all_data
 
     async def linkedin_phase():
-        return await linkedin_dork(session, company["name"], pp)
+        return await linkedin_dork(company["name"], proxy_rotator)
 
     web_data, li_people = await asyncio.gather(website_phase(), linkedin_phase())
     return merge_and_match(web_data, li_people, domain)
@@ -952,7 +987,7 @@ async def run_enrichment(job_id: int):
             return
 
         # Run enrichment
-        pp = ProxyPool()
+        proxy_rotator = build_proxy_rotator()
         workers = DEFAULT_WORKERS
         processed = 0
         found = 0
@@ -961,87 +996,82 @@ async def run_enrichment(job_id: int):
         start = time.time()
         write_batch = []
 
-        connector = aiohttp.TCPConnector(limit=workers * 2, limit_per_host=50,
-                                          ttl_dns_cache=300, enable_cleanup_closed=True)
+        # Test if Bing search works (non-blocking — enrichment continues either way)
+        await _probe_search(proxy_rotator)
+        if _search_available:
+            log.info(f"Job #{job_id} search engine available — full enrichment mode")
+        else:
+            log.info(f"Job #{job_id} search unavailable — website-only scraping mode")
 
-        async with aiohttp.ClientSession(connector=connector,
-                                          timeout=aiohttp.ClientTimeout(total=30)) as session:
-            # Test if Bing search works (non-blocking — enrichment continues either way)
-            await _probe_search(session, pp)
-            if _search_available:
-                log.info(f"Job #{job_id} search engine available — full enrichment mode")
-            else:
-                log.info(f"Job #{job_id} search unavailable — website-only scraping mode")
+        for batch_start in range(0, total, workers * 2):
+            batch = companies[batch_start:batch_start + workers * 2]
+            batch_num = batch_start // (workers * 2) + 1
+            log.info(f"Job #{job_id} batch {batch_num} — processing {len(batch)} companies (total: {processed}/{total})")
+            sem = asyncio.Semaphore(workers)
 
-            for batch_start in range(0, total, workers * 2):
-                batch = companies[batch_start:batch_start + workers * 2]
-                batch_num = batch_start // (workers * 2) + 1
-                log.info(f"Job #{job_id} batch {batch_num} — processing {len(batch)} companies (total: {processed}/{total})")
-                sem = asyncio.Semaphore(workers)
-
-                async def bounded(c):
-                    async with sem:
-                        try:
-                            people = await asyncio.wait_for(
-                                process_one(session, c, pp),
-                                timeout=30,
-                            )
-                            return c, people, ""
-                        except asyncio.TimeoutError:
-                            return c, [], "timeout"
-                        except Exception as e:
-                            return c, [], str(e)[:200]
-
-                results = await asyncio.gather(*[bounded(c) for c in batch])
-                result_batch = []
-
-                for company, people, error in results:
-                    processed += 1
-                    if people:
-                        found += 1
-                        total_people += len(people)
-                        write_batch.append((company["sheet_row"], people))
-                        result_batch.append({
-                            "company_name": company["name"],
-                            "province": company["province"],
-                            "website": company["website"],
-                            "people": people,
-                        })
-                    if error:
-                        errors += 1
-
-                log.info(f"Job #{job_id} batch {batch_num} done — found={found} errors={errors} people={total_people}")
-
-                # Save results to app database
-                if result_batch:
-                    db.save_results(job_id, result_batch)
-
-                # Write to Google Sheets every 100
-                if len(write_batch) >= 100:
+            async def bounded(c):
+                async with sem:
                     try:
-                        sheets_flush(ws, col_map, write_batch)
-                    except Exception:
-                        pass
-                    write_batch.clear()
+                        people = await asyncio.wait_for(
+                            process_one(c, proxy_rotator),
+                            timeout=30,
+                        )
+                        return c, people, ""
+                    except asyncio.TimeoutError:
+                        return c, [], "timeout"
+                    except Exception as e:
+                        return c, [], str(e)[:200]
 
-                # Update job progress
-                elapsed = time.time() - start
-                rate = processed / max(elapsed, 1)
-                remaining = (total - processed) / max(rate, 0.01)
-                eta = f"{remaining / 60:.0f}m" if remaining > 60 else f"{remaining:.0f}s"
+            results = await asyncio.gather(*[bounded(c) for c in batch])
+            result_batch = []
 
-                db.update_job(job_id,
-                              processed=processed,
-                              found_people=found,
-                              total_people=total_people,
-                              errors=errors,
-                              rate=round(rate, 1),
-                              eta=eta)
+            for company, people, error in results:
+                processed += 1
+                if people:
+                    found += 1
+                    total_people += len(people)
+                    write_batch.append((company["sheet_row"], people))
+                    result_batch.append({
+                        "company_name": company["name"],
+                        "province": company["province"],
+                        "website": company["website"],
+                        "people": people,
+                    })
+                if error:
+                    errors += 1
 
-                # Check if job was cancelled
-                current = db.get_job(job_id)
-                if current and current["status"] == "cancelled":
-                    break
+            log.info(f"Job #{job_id} batch {batch_num} done — found={found} errors={errors} people={total_people}")
+
+            # Save results to app database
+            if result_batch:
+                db.save_results(job_id, result_batch)
+
+            # Write to Google Sheets every 100
+            if len(write_batch) >= 100:
+                try:
+                    sheets_flush(ws, col_map, write_batch)
+                except Exception:
+                    pass
+                write_batch.clear()
+
+            # Update job progress
+            elapsed = time.time() - start
+            rate = processed / max(elapsed, 1)
+            remaining = (total - processed) / max(rate, 0.01)
+            eta = f"{remaining / 60:.0f}m" if remaining > 60 else f"{remaining:.0f}s"
+
+            db.update_job(job_id,
+                          processed=processed,
+                          found_people=found,
+                          total_people=total_people,
+                          errors=errors,
+                          rate=round(rate, 1),
+                          eta=eta)
+
+            # Check if job was cancelled
+            current = db.get_job(job_id)
+            if current and current["status"] == "cancelled":
+                break
 
         # Final flush to sheets
         if write_batch:

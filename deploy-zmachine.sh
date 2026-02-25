@@ -126,17 +126,38 @@ sudo -u $APP_USER bash -c "
     source $APP_DIR/venv/bin/activate
     pip install -q --upgrade pip
     pip install -q -r $APP_DIR/requirements.txt
+    pip install -q 'scrapling[all]'
+    scrapling install
     echo '  Installing Playwright Chromium (this takes a minute)...'
     playwright install chromium
 "
 echo "  Python dependencies installed"
 
-# ── 5. Systemd service ──
-echo -e "\n[5/7] Creating systemd service..."
+# ── 5. Systemd services (Xvfb + App) ──
+echo -e "\n[5/7] Creating systemd services..."
+
+# Xvfb virtual display — needed for headed Chromium on a headless VPS
+cat > /etc/systemd/system/xvfb.service << EOF
+[Unit]
+Description=X Virtual Frame Buffer (display :99)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Main app — depends on xvfb so the virtual display is ready
 cat > /etc/systemd/system/enrichment.service << EOF
 [Unit]
 Description=Data Enrichment Web App (data-enrichment.zmachine.pro)
-After=network.target
+After=network.target xvfb.service
+Requires=xvfb.service
 
 [Service]
 Type=simple
@@ -154,6 +175,8 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
+systemctl enable xvfb
+systemctl start xvfb
 systemctl enable enrichment
 systemctl start enrichment
 

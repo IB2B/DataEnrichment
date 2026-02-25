@@ -6,21 +6,17 @@ with contact info enrichment, website email crawling, and SerpAPI search.
 import re, random, asyncio, json, logging
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
+from scrapling.fetchers import AsyncFetcher
 import database as db
 from config import LINKEDIN_COOKIES_DIR, DEFAULT_PAGE_DELAY_MIN, DEFAULT_PAGE_DELAY_MAX
-from enrichment_worker import ProxyPool, parse_proxy_for_playwright
+from enrichment_worker import ProxyPool, parse_proxy_for_playwright, build_proxy_rotator
 
 log = logging.getLogger("enrichment.linkedin")
 
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-]
+# Fixed UA shared between manual login and scraper so LinkedIn doesn't invalidate the session
+LINKEDIN_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
 # ── SerpAPI blocklists ──
 
@@ -183,20 +179,13 @@ function extractContact() {
     }
     info.email = emails.join('; ');
 
-    // Phone
+    // Phone — only from tel: links (never regex on page text to avoid matching URL numbers)
     const telLinks = body.querySelectorAll('a[href^="tel:"]');
     const phones = [];
     telLinks.forEach(a => {
         const phone = a.getAttribute('href').replace('tel:', '').trim();
-        if (phone && !phones.includes(phone)) phones.push(phone);
+        if (phone && phone.length >= 7 && !phones.includes(phone)) phones.push(phone);
     });
-    if (!phones.length) {
-        const phoneRx = /(?:\\+\\d{1,3}[\\s.-]?)?(?:\\(\\d{1,4}\\)[\\s.-]?)?\\d[\\d\\s.\\-]{6,14}\\d/g;
-        (text.match(phoneRx) || []).forEach(p => {
-            const clean = p.replace(/[\\s.\\-]/g, '');
-            if (clean.length >= 7 && clean.length <= 16 && !phones.includes(p.trim())) phones.push(p.trim());
-        });
-    }
     info.phone = phones.join('; ');
 
     // Website
@@ -247,30 +236,212 @@ async def _extract_contact_overlay(page) -> dict:
         return {}
 
 
-async def _find_email_on_website(page, website_url: str) -> str:
-    """Visit a website and scan for email addresses."""
+_email_rx = re.compile(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}')
+
+_WEBSITE_JUNK_DOMAINS = {
+    "example.com", "sentry.io", "wixpress.com", "wordpress.org", "w3.org",
+    "schema.org", "googleapis.com", "google.com", "facebook.com",
+    "twitter.com", "cloudflare.com", "gravatar.com", "instagram.com",
+}
+
+_WEBSITE_GENERIC_PREFIXES = {
+    "info", "contact", "contatti", "admin", "support", "help", "noreply",
+    "no-reply", "postmaster", "webmaster", "sales", "marketing", "office",
+    "newsletter", "privacy", "abuse", "billing", "jobs", "hr",
+}
+
+
+def _is_good_email(email: str, domain: str = "") -> bool:
+    """Filter out junk/generic emails."""
+    email = email.lower()
+    if "@" not in email:
+        return False
+    pre, dom = email.split("@", 1)
+    if dom in _WEBSITE_JUNK_DOMAINS:
+        return False
+    if dom.endswith((".png", ".jpg", ".css", ".js", ".gif", ".svg")):
+        return False
+    if pre in _WEBSITE_GENERIC_PREFIXES:
+        return False
+    if len(pre) < 2:
+        return False
+    if domain and dom != domain:
+        return False
+    return True
+
+
+async def _scrapling_fetch(url: str, proxy_rotator=None, timeout: int = 10):
+    """Fetch a URL with Scrapling. Returns page or None."""
+    try:
+        proxy = proxy_rotator.get_proxy() if proxy_rotator else None
+        page = await AsyncFetcher.get(
+            url,
+            stealthy_headers=True,
+            follow_redirects=True,
+            timeout=timeout,
+            proxy=proxy,
+            verify=False,
+        )
+        if page.status in (200, 202):
+            return page
+        else:
+            log.debug(f"  _scrapling_fetch {url} — status {page.status}")
+    except Exception as e:
+        log.debug(f"  _scrapling_fetch {url} — error: {e}")
+    return None
+
+
+async def _extract_emails_from_page(page, domain: str = "") -> set:
+    """Extract emails from a Scrapling page response."""
+    found = set()
+    try:
+        for a in page.css('a[href^="mailto:"]'):
+            e = a.attrib.get('href', '').replace('mailto:', '').split('?')[0].strip().lower()
+            if _is_good_email(e, domain):
+                found.add(e)
+        for e in _email_rx.findall(page.get_all_text()):
+            e = e.lower()
+            if _is_good_email(e, domain):
+                found.add(e)
+        # Also search raw HTML for emails (sometimes in attributes, not visible text)
+        try:
+            raw_html = str(page.body) if hasattr(page, 'body') else ""
+            for e in _email_rx.findall(raw_html):
+                e = e.lower()
+                if _is_good_email(e, domain):
+                    found.add(e)
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return found
+
+
+async def _find_email_on_website(page_unused, website_url: str, proxy_rotator=None) -> str:
+    """Scrape a website for email addresses using Scrapling (fast, no browser needed)."""
     url = website_url.split(";")[0].strip()
     if not url:
         return ""
     if not url.startswith("http"):
         url = "https://" + url
 
+    domain = urlparse(url).netloc.lower().replace("www.", "")
     base = url.rstrip("/")
-    pages_to_check = [
-        url, base + "/contact", base + "/contacts",
-        base + "/contatti", base + "/about", base + "/chi-siamo",
-    ]
 
-    for page_url in pages_to_check:
-        try:
-            await page.goto(page_url, wait_until="domcontentloaded", timeout=15000)
-            await _human_delay(1.0, 2.0)
-            emails = await page.evaluate(JS_WEBSITE_EMAILS)
-            if emails:
-                return "; ".join(sorted(set(emails)))
-        except Exception:
+    # Fetch homepage first (most likely to have emails or links to contact page)
+    homepage = await _scrapling_fetch(url, proxy_rotator, timeout=8)
+    if homepage:
+        emails = await _extract_emails_from_page(homepage, domain)
+        if emails:
+            return "; ".join(sorted(emails))
+
+    # Fetch contact/about pages in parallel
+    subpages = [base + p for p in ["/contact", "/contacts", "/contatti", "/chi-siamo"]]
+    tasks = [_scrapling_fetch(u, proxy_rotator, timeout=6) for u in subpages]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    for result in results:
+        if isinstance(result, Exception) or result is None:
             continue
+        emails = await _extract_emails_from_page(result, domain)
+        if emails:
+            return "; ".join(sorted(emails))
+
     return ""
+
+
+async def _search_email_web(name: str, company: str = "", proxy_rotator=None) -> str:
+    """Search Bing (+ Google) for a person's email using Scrapling (free, no API key).
+    Also visits top result pages (ContactOut, RocketReach, etc.) to extract emails.
+    Tries name+company first, then name-only as fallback."""
+    if not name or name == "(hidden)":
+        return ""
+
+    from urllib.parse import quote_plus
+
+    _email_sites = {"contactout.com", "rocketreach.co", "lusha.com", "signalhire.com",
+                    "apollo.io", "hunter.io", "snov.io", "getprospect.com",
+                    "zoominfo.com", "leadiq.com", "clearbit.com"}
+
+    found_emails = set()
+    result_urls = []
+
+    # Build queries: name+company first, then name-only fallback
+    queries = []
+    if company:
+        queries.append(f'"{name}" "{company}" email')
+    queries.append(f'"{name}" email')
+
+    for query in queries:
+        encoded = quote_plus(query)
+        log.info(f"    Web search: {query}")
+
+        # Search Bing (reliable) + Google (often 429, but try anyway) in parallel
+        search_tasks = [
+            _scrapling_fetch(f"https://www.bing.com/search?q={encoded}&count=15", proxy_rotator, timeout=10),
+            _scrapling_fetch(f"https://www.google.com/search?q={encoded}&num=10", proxy_rotator, timeout=8),
+        ]
+        pages = await asyncio.gather(*search_tasks, return_exceptions=True)
+
+        for i, page in enumerate(pages):
+            engine = "Bing" if i == 0 else "Google"
+            if isinstance(page, Exception) or page is None:
+                log.debug(f"    {engine} search failed or returned None")
+                continue
+            try:
+                # Extract emails from visible text
+                page_text = page.get_all_text()
+                for match in _email_rx.findall(page_text):
+                    email = match.lower()
+                    if _is_good_email(email):
+                        found_emails.add(email)
+                        log.info(f"    Found email in {engine} snippet: {email}")
+
+                # Also extract from raw HTML (emails sometimes in href/title but not visible text)
+                try:
+                    raw_html = str(page.body) if hasattr(page, 'body') else ""
+                    for match in _email_rx.findall(raw_html):
+                        email = match.lower()
+                        if _is_good_email(email):
+                            found_emails.add(email)
+                except Exception:
+                    pass
+
+                # Collect email-rich site URLs from search results
+                for a in page.css('a[href]'):
+                    href = a.attrib.get('href', '')
+                    # Bing wraps URLs, try to extract the real URL
+                    if 'bing.com/ck/' in href:
+                        continue
+                    if href.startswith('http') and any(site in href for site in _email_sites):
+                        result_urls.append(href)
+                    # Also grab regular result links that aren't search engines
+                    elif href.startswith('http') and not any(d in href for d in ('google.', 'bing.', 'microsoft.')):
+                        pass  # don't visit all links, only email-rich sites
+            except Exception as e:
+                log.debug(f"    {engine} parse error: {e}")
+                continue
+
+        if found_emails:
+            return "; ".join(sorted(found_emails))
+
+    # If no emails in snippets, visit email-rich sites in parallel (max 4)
+    if result_urls:
+        unique_urls = list(dict.fromkeys(result_urls))[:4]
+        log.info(f"    Visiting {len(unique_urls)} email-rich sites: {unique_urls}")
+        visit_tasks = [_scrapling_fetch(u, proxy_rotator, timeout=8) for u in unique_urls]
+        visit_results = await asyncio.gather(*visit_tasks, return_exceptions=True)
+
+        for page in visit_results:
+            if isinstance(page, Exception) or page is None:
+                continue
+            try:
+                emails = await _extract_emails_from_page(page)
+                found_emails.update(emails)
+            except Exception:
+                continue
+
+    return "; ".join(sorted(found_emails)) if found_emails else ""
 
 
 def _google_dork_email(name: str, company: str = "", serpapi_key: str = "") -> str:
@@ -327,70 +498,97 @@ def _google_dork_email(name: str, company: str = "", serpapi_key: str = "") -> s
     return ""
 
 
-async def _enrich_contacts(page, profiles: list, serpapi_key: str, scrape_id: int):
+async def _enrich_one_profile(page, profile: dict, serpapi_key: str, scrape_id: int, idx: int, total: int, proxy_rotator=None):
+    """Enrich a single profile: LinkedIn overlay + Scrapling website/search."""
+    url = profile.get("profile_url", "")
+    name = profile.get("full_name", "?")
+
+    profile.setdefault("email", "")
+    profile.setdefault("phone", "")
+    profile.setdefault("website", "")
+    profile.setdefault("website_email", "")
+    profile.setdefault("google_email", "")
+
+    if not url or url == "(hidden)":
+        log.info(f"  Scrape #{scrape_id} — [{idx}/{total}] {name} — no profile URL, skipping")
+        return
+
+    # Visit contact overlay (must use browser — sequential)
+    contact_url = url.rstrip("/") + "/overlay/contact-info/"
+    log.info(f"  Scrape #{scrape_id} — [{idx}/{total}] {name} — fetching contact info")
+
+    try:
+        await page.goto(contact_url, wait_until="domcontentloaded", timeout=15000)
+        await _human_delay(0.8, 1.5)
+
+        info = await _extract_contact_overlay(page)
+        profile["email"] = info.get("email", "")
+        profile["phone"] = info.get("phone", "")
+        profile["website"] = info.get("website", "")
+
+        parts = []
+        if info.get("email"):
+            parts.append(f"email={info['email']}")
+        if info.get("phone"):
+            parts.append(f"phone={info['phone']}")
+        if info.get("website"):
+            parts.append(f"web={info['website']}")
+        log.info(f"    Contact: {' | '.join(parts) if parts else '(none)'}")
+
+    except Exception as exc:
+        log.warning(f"    Contact overlay error for {name}: {exc}")
+
+    # Run Scrapling enrichment tasks in parallel (doesn't use the browser)
+    scrapling_tasks = []
+    website = profile.get("website", "")
+    company = profile.get("company", "")
+
+    # Always search web for email
+    if not profile["email"]:
+        if website:
+            scrapling_tasks.append(("website", _find_email_on_website(None, website, proxy_rotator)))
+        scrapling_tasks.append(("search", _search_email_web(name, company, proxy_rotator)))
+
+    if scrapling_tasks:
+        results = await asyncio.gather(
+            *[task for _, task in scrapling_tasks],
+            return_exceptions=True,
+        )
+        for (label, _), result in zip(scrapling_tasks, results):
+            if isinstance(result, Exception) or not result:
+                continue
+            if label == "website" and not profile["website_email"]:
+                profile["website_email"] = result
+                log.info(f"    Website email: {result}")
+            elif label == "search" and not profile["google_email"]:
+                profile["google_email"] = result
+                log.info(f"    Web search email: {result}")
+
+    # SerpAPI as last resort (only if nothing found and key configured)
+    has_email = profile["email"] or profile["website_email"] or profile["google_email"]
+    if not has_email and serpapi_key:
+        try:
+            loop = asyncio.get_event_loop()
+            google_email = await loop.run_in_executor(
+                None, _google_dork_email, name, company, serpapi_key
+            )
+            if google_email:
+                profile["google_email"] = google_email
+                log.info(f"    SerpAPI email: {google_email}")
+        except Exception:
+            pass
+
+
+async def _enrich_contacts(page, profiles: list, serpapi_key: str, scrape_id: int, proxy_rotator=None):
     """
-    Visit each profile's contact-info overlay, extract emails/phones/websites,
-    then optionally crawl the website and do a Google dork for emails.
+    Enrich each profile: LinkedIn overlay (browser) + website/search (Scrapling, parallel).
     """
     total = len(profiles)
     for idx, profile in enumerate(profiles, 1):
-        url = profile.get("profile_url", "")
-        name = profile.get("full_name", "?")
-
-        profile.setdefault("email", "")
-        profile.setdefault("phone", "")
-        profile.setdefault("website", "")
-        profile.setdefault("website_email", "")
-        profile.setdefault("google_email", "")
-
-        if not url or url == "(hidden)":
-            log.info(f"  Scrape #{scrape_id} — [{idx}/{total}] {name} — no profile URL, skipping contact")
-            continue
-
-        # Visit contact overlay
-        contact_url = url.rstrip("/") + "/overlay/contact-info/"
-        log.info(f"  Scrape #{scrape_id} — [{idx}/{total}] {name} — fetching contact info")
-
         try:
-            await page.goto(contact_url, wait_until="domcontentloaded", timeout=20000)
-            await _human_delay(1.5, 2.5)
-
-            info = await _extract_contact_overlay(page)
-            profile["email"] = info.get("email", "")
-            profile["phone"] = info.get("phone", "")
-            profile["website"] = info.get("website", "")
-
-            parts = []
-            if info.get("email"):
-                parts.append(f"email={info['email']}")
-            if info.get("phone"):
-                parts.append(f"phone={info['phone']}")
-            if info.get("website"):
-                parts.append(f"web={info['website']}")
-            log.info(f"    Contact: {' | '.join(parts) if parts else '(none)'}")
-
-            # Crawl website for emails
-            website = info.get("website", "")
-            if website:
-                found_email = await _find_email_on_website(page, website)
-                if found_email:
-                    profile["website_email"] = found_email
-                    log.info(f"    Website email: {found_email}")
-
-            # Google dork if no email found yet
-            has_email = profile["email"] or profile["website_email"]
-            if not has_email and serpapi_key:
-                company = profile.get("company", "")
-                loop = asyncio.get_event_loop()
-                google_email = await loop.run_in_executor(
-                    None, _google_dork_email, name, company, serpapi_key
-                )
-                if google_email:
-                    profile["google_email"] = google_email
-                    log.info(f"    Google email: {google_email}")
-
+            await _enrich_one_profile(page, profile, serpapi_key, scrape_id, idx, total, proxy_rotator)
         except Exception as exc:
-            log.warning(f"    Contact enrichment error for {name}: {exc}")
+            log.warning(f"    Enrichment error for {profile.get('full_name', '?')}: {exc}")
 
 
 async def run_linkedin_scrape(scrape_id: int):
@@ -416,14 +614,19 @@ async def run_linkedin_scrape(scrape_id: int):
     pw = await async_playwright().start()
 
     try:
-        ua = random.choice(USER_AGENTS)
+        ua = LINKEDIN_UA
         pp = ProxyPool()
         proxy_dict = parse_proxy_for_playwright(pp.get())
+        scrapling_proxy_rotator = build_proxy_rotator()
 
+        # Use headed mode (hidden off-screen) so cookies from manual login are shared.
+        # Headless mode uses a different profile and won't see the manual login cookies.
         launch_kwargs = dict(
             user_data_dir=str(LINKEDIN_COOKIES_DIR),
-            headless=True,
+            headless=False,
             args=[
+                "--window-position=-9999,-9999",
+                "--window-size=1,1",
                 "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
@@ -453,10 +656,30 @@ async def run_linkedin_scrape(scrape_id: int):
 
         # Check if already logged in
         await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=30000)
-        await asyncio.sleep(random.uniform(1, 2))
+        await asyncio.sleep(random.uniform(2, 4))
 
         current_url = page.url
-        if "/login" in current_url or "/uas/" in current_url or "signin" in current_url:
+        log.info(f"LinkedIn scrape #{scrape_id} — feed redirect URL: {current_url}")
+        needs_login = "/login" in current_url or "/uas/" in current_url or "signin" in current_url
+        hit_checkpoint = "checkpoint" in current_url or "challenge" in current_url
+
+        if hit_checkpoint:
+            # Cookies exist but LinkedIn wants verification — wait and retry
+            log.warning(f"LinkedIn scrape #{scrape_id} — checkpoint detected, waiting and retrying...")
+            await asyncio.sleep(random.uniform(5, 8))
+            await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=30000)
+            await asyncio.sleep(random.uniform(3, 5))
+            current_url = page.url
+            needs_login = "/login" in current_url or "/uas/" in current_url or "signin" in current_url
+            hit_checkpoint = "checkpoint" in current_url or "challenge" in current_url
+
+            if hit_checkpoint:
+                db.update_linkedin_scrape(scrape_id, status="error",
+                    error_message="LinkedIn requires verification. Go to Settings > LinkedIn Session to log in manually with a visible browser, then retry.",
+                    finished_at=datetime.now().isoformat())
+                return
+
+        if needs_login:
             if not li_email or not li_password:
                 db.update_linkedin_scrape(scrape_id, status="error",
                     error_message="LinkedIn credentials not configured. Go to Settings.",
@@ -572,7 +795,7 @@ async def run_linkedin_scrape(scrape_id: int):
 
             # Enrich contacts
             search_results_url = page.url
-            await _enrich_contacts(page, page_people, serpapi_key, scrape_id)
+            await _enrich_contacts(page, page_people, serpapi_key, scrape_id, proxy_rotator=scrapling_proxy_rotator)
 
             # Navigate back to search results
             log.info(f"LinkedIn scrape #{scrape_id} — returning to search results")
@@ -683,7 +906,7 @@ async def run_manual_login(status_dict: dict):
     pw = await async_playwright().start()
 
     try:
-        ua = random.choice(USER_AGENTS)
+        ua = LINKEDIN_UA
         context = await pw.chromium.launch_persistent_context(
             user_data_dir=str(LINKEDIN_COOKIES_DIR),
             headless=False,
