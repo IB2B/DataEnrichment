@@ -63,6 +63,8 @@ Built with **FastAPI**, **Jinja2**, and **SQLite**.
 - **Google APIs:** gspread, Google Sheets API, Google Drive API
 - **Auth:** PyJWT, Google OAuth 2.0
 
+> **Full technical documentation** — architecture, database schema, API reference, enrichment pipeline details, and deployment guide: **[TECHNICAL_DOCS.md](TECHNICAL_DOCS.md)**
+
 ## Quick Start
 
 ### 1. Deploy to a VPS (Ubuntu)
