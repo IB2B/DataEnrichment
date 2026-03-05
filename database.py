@@ -156,6 +156,16 @@ def init_db():
             token_expiry TEXT NOT NULL,
             google_email TEXT DEFAULT ''
         );
+
+        CREATE TABLE IF NOT EXISTS linkedin_accounts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            label TEXT NOT NULL,
+            li_at_cookie TEXT NOT NULL,
+            is_active INTEGER DEFAULT 1,
+            last_used_at TEXT DEFAULT '',
+            use_count INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
     """)
     conn.commit()
 
@@ -541,11 +551,29 @@ def delete_website_scrape(scrape_id):
     conn.close()
 
 
+def _cap_emails_csv(emails, max_count=5):
+    """Normalize, de-duplicate, and cap comma-separated emails."""
+    if not emails:
+        return ""
+    seen = set()
+    out = []
+    for raw in str(emails).split(","):
+        email = raw.strip().lower()
+        if not email or email in seen:
+            continue
+        seen.add(email)
+        out.append(email)
+        if len(out) >= max_count:
+            break
+    return ", ".join(out)
+
+
 def save_website_result(scrape_id, url, emails, phones, names, social_links, logo_url=""):
+    capped_emails = _cap_emails_csv(emails, max_count=5)
     conn = get_db()
     conn.execute(
         "INSERT INTO website_results (scrape_id, url, emails, phones, names, social_links, logo_url) VALUES (?,?,?,?,?,?,?)",
-        (scrape_id, url, emails, phones, names, social_links, logo_url))
+        (scrape_id, url, capped_emails, phones, names, social_links, logo_url))
     conn.commit()
     conn.close()
 
@@ -563,7 +591,10 @@ def get_website_results(scrape_id, search="", limit=500, offset=0):
             "SELECT * FROM website_results WHERE scrape_id=? ORDER BY id LIMIT ? OFFSET ?",
             (scrape_id, limit, offset)).fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+    out = [dict(r) for r in rows]
+    for r in out:
+        r["emails"] = _cap_emails_csv(r.get("emails", ""), max_count=5)
+    return out
 
 
 def get_website_results_count(scrape_id, search=""):
@@ -588,9 +619,28 @@ def get_website_results_csv(scrape_id):
     conn.close()
     lines = ["URL,Emails,Phones,Names,Social Links,Logo URL"]
     for r in rows:
-        line = ",".join(f'"{v}"' for v in [r["url"], r["emails"], r["phones"], r["names"], r["social_links"], r["logo_url"]])
+        capped_emails = _cap_emails_csv(r["emails"], max_count=5)
+        line = ",".join(f'"{v}"' for v in [r["url"], capped_emails, r["phones"], r["names"], r["social_links"], r["logo_url"]])
         lines.append(line)
     return "\n".join(lines)
+
+
+def get_website_email_stats(scrape_id):
+    """Get email statistics for a scrape: total emails and URLs with at least one email."""
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT emails FROM website_results WHERE scrape_id=?", (scrape_id,)).fetchall()
+    conn.close()
+    total_emails = 0
+    urls_with_emails = 0
+    for r in rows:
+        emails_str = _cap_emails_csv(r["emails"], max_count=5)
+        if emails_str and emails_str.strip():
+            email_list = [e.strip() for e in emails_str.split(",") if e.strip()]
+            if email_list:
+                total_emails += len(email_list)
+                urls_with_emails += 1
+    return {"total_emails": total_emails, "urls_with_emails": urls_with_emails}
 
 
 # ─── Google Maps Scrapes ───
@@ -696,3 +746,62 @@ def get_google_maps_results_csv(scrape_id):
             r["reviews_count"], r["website"], r["email"], r["google_maps_url"]])
         lines.append(line)
     return "\n".join(lines)
+
+
+# ─── LinkedIn Accounts (Rotation Pool) ───
+
+def add_linkedin_account(label, li_at_cookie):
+    conn = get_db()
+    cur = conn.execute(
+        "INSERT INTO linkedin_accounts (label, li_at_cookie) VALUES (?,?)",
+        (label, li_at_cookie))
+    aid = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return aid
+
+
+def get_all_linkedin_accounts():
+    conn = get_db()
+    rows = conn.execute("SELECT * FROM linkedin_accounts ORDER BY id").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_active_linkedin_accounts():
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM linkedin_accounts WHERE is_active=1 ORDER BY id"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_next_linkedin_account():
+    """Pick the active account with the oldest last_used_at (round-robin)."""
+    conn = get_db()
+    row = conn.execute(
+        "SELECT * FROM linkedin_accounts WHERE is_active=1 "
+        "ORDER BY last_used_at ASC, use_count ASC, id ASC LIMIT 1"
+    ).fetchone()
+    if row:
+        conn.execute(
+            "UPDATE linkedin_accounts SET last_used_at=datetime('now'), use_count=use_count+1 WHERE id=?",
+            (row["id"],))
+        conn.commit()
+    conn.close()
+    return dict(row) if row else None
+
+
+def delete_linkedin_account(account_id):
+    conn = get_db()
+    conn.execute("DELETE FROM linkedin_accounts WHERE id=?", (account_id,))
+    conn.commit()
+    conn.close()
+
+
+def toggle_linkedin_account(account_id, is_active):
+    conn = get_db()
+    conn.execute("UPDATE linkedin_accounts SET is_active=? WHERE id=?", (is_active, account_id))
+    conn.commit()
+    conn.close()

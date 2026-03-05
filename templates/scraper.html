@@ -4,7 +4,7 @@
 <div class="p-8 max-w-5xl mx-auto fade-in">
     <div class="mb-8">
         <h2 class="text-2xl font-bold text-white">Website Scraper</h2>
-        <p class="text-gray-400 text-sm mt-1">Extract emails, phones, names, and social links from websites</p>
+        <p class="text-gray-400 text-sm mt-1">Bulk extract emails from websites — up to 1,000 URLs per scrape</p>
     </div>
 
     {% if error %}
@@ -19,14 +19,33 @@
             <svg class="w-5 h-5 text-accent" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6"/></svg>
             New Scrape
         </h3>
-        <form method="POST" action="/api/scraper/start" class="space-y-4">
+        <form method="POST" action="/api/scraper/start" enctype="multipart/form-data" class="space-y-4">
             <div>
-                <label class="text-sm text-gray-300 mb-1 block">Website URLs (one per line)</label>
-                <textarea name="urls" rows="6" required
+                <label class="text-sm text-gray-300 mb-1 block">Paste URLs (one per line)</label>
+                <textarea name="urls" rows="10" id="url-input"
                     class="w-full bg-dark-400 border border-gray-600 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent font-mono"
-                    placeholder="https://example.com&#10;https://anothersite.it&#10;company-website.com"></textarea>
-                <p class="text-xs text-gray-500 mt-1">The scraper will visit each URL + its contact/about pages to find emails, phones, names, and social links</p>
+                    placeholder="https://example.com&#10;https://anothersite.it&#10;company-website.com&#10;&#10;Paste up to 1,000 URLs..."></textarea>
+                <div class="flex items-center justify-between mt-1">
+                    <p class="text-xs text-gray-500">The scraper checks each domain homepage plus contact pages, up to 5 emails per domain</p>
+                    <span class="text-xs font-mono" id="url-counter">
+                        <span id="url-count" class="text-accent">0</span><span class="text-gray-500"> / 1,000 URLs</span>
+                    </span>
+                </div>
             </div>
+
+            <!-- File upload -->
+            <div>
+                <label class="text-sm text-gray-300 mb-1 block">Or upload a file (.txt or .csv with URLs)</label>
+                <div class="flex items-center gap-3">
+                    <label class="cursor-pointer bg-dark-400 border border-gray-600 hover:border-gray-500 rounded-lg px-4 py-2.5 text-sm text-gray-300 hover:text-white transition-colors flex items-center gap-2">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/></svg>
+                        Choose File
+                        <input type="file" name="file" accept=".txt,.csv" class="hidden" id="file-input">
+                    </label>
+                    <span class="text-xs text-gray-500" id="file-name">No file chosen</span>
+                </div>
+            </div>
+
             <button type="submit"
                 class="bg-accent hover:bg-accent-hover text-white font-medium px-6 py-2.5 rounded-lg transition-colors text-sm flex items-center gap-2">
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
@@ -45,12 +64,15 @@
                     <span class="text-sm font-medium text-white">Scrape #{{ active.id }}</span>
                     <span class="ml-2 text-xs px-2 py-0.5 rounded-full bg-green-500/10 text-green-400">running</span>
                 </div>
+                <div class="text-xs text-gray-400">
+                    {{ active.total_urls }} URLs
+                </div>
             </div>
             <div class="w-full bg-dark-400 rounded-full h-2 mb-3">
                 <div class="bg-accent rounded-full h-2 transition-all duration-500 pulse-bar" id="ws-bar"
                      style="width: {{ (active.processed / active.total_urls * 100) if active.total_urls > 0 else 0 }}%"></div>
             </div>
-            <div class="grid grid-cols-2 gap-4 text-center">
+            <div class="grid grid-cols-3 gap-4 text-center">
                 <div>
                     <div class="text-lg font-bold text-white" id="ws-processed">{{ active.processed }}</div>
                     <div class="text-xs text-gray-500">Processed</div>
@@ -58,6 +80,10 @@
                 <div>
                     <div class="text-lg font-bold text-gray-300" id="ws-total">{{ active.total_urls }}</div>
                     <div class="text-xs text-gray-500">Total URLs</div>
+                </div>
+                <div>
+                    <div class="text-lg font-bold text-accent" id="ws-pct">{{ ((active.processed / active.total_urls * 100) if active.total_urls > 0 else 0)|round(1) }}%</div>
+                    <div class="text-xs text-gray-500">Progress</div>
                 </div>
             </div>
         </div>
@@ -116,6 +142,35 @@
 
 {% block scripts %}
 <script>
+// URL counter
+const ta = document.getElementById('url-input');
+const counter = document.getElementById('url-count');
+if (ta && counter) {
+    function updateCount() {
+        const lines = ta.value.split('\n').filter(l => l.trim().length > 0);
+        counter.textContent = lines.length;
+        counter.className = lines.length > 1000 ? 'text-red-400' : 'text-accent';
+    }
+    ta.addEventListener('input', updateCount);
+    updateCount();
+}
+
+// File upload name display
+const fileInput = document.getElementById('file-input');
+const fileName = document.getElementById('file-name');
+if (fileInput && fileName) {
+    fileInput.addEventListener('change', function() {
+        if (this.files.length > 0) {
+            fileName.textContent = this.files[0].name;
+            fileName.className = 'text-xs text-accent';
+        } else {
+            fileName.textContent = 'No file chosen';
+            fileName.className = 'text-xs text-gray-500';
+        }
+    });
+}
+
+// Active scrape progress polling
 const el = document.getElementById('active-scrape');
 if (el) {
     const id = el.dataset.scrapeId;
@@ -127,6 +182,7 @@ if (el) {
             document.getElementById('ws-total').textContent = s.total_urls;
             const pct = s.total_urls > 0 ? (s.processed / s.total_urls * 100) : 0;
             document.getElementById('ws-bar').style.width = pct + '%';
+            document.getElementById('ws-pct').textContent = pct.toFixed(1) + '%';
             if (s.status === 'done' || s.status === 'error') {
                 location.reload();
             }

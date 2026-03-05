@@ -107,45 +107,10 @@
         </form>
     </div>
 
-    <!-- LinkedIn Credentials -->
+    <!-- LinkedIn Scraper -->
     <div class="bg-dark-300 rounded-xl border border-gray-700/50 p-6 mb-6">
         <h3 class="text-lg font-semibold text-white mb-4">LinkedIn Scraper</h3>
-        <form method="POST" action="/settings/linkedin" class="space-y-4">
-            <div>
-                <label class="text-sm text-gray-300 mb-1 block">LinkedIn Email</label>
-                <input type="email" name="linkedin_email" value="{{ settings.linkedin_email or '' }}"
-                    class="w-full bg-dark-400 border border-gray-600 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-accent"
-                    placeholder="your-linkedin@email.com">
-            </div>
-            <div>
-                <label class="text-sm text-gray-300 mb-1 block">LinkedIn Password</label>
-                <input type="password" name="linkedin_password" value="{{ settings.linkedin_password or '' }}"
-                    class="w-full bg-dark-400 border border-gray-600 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-accent"
-                    placeholder="&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;">
-            </div>
-            <div class="grid grid-cols-2 gap-4">
-                <div>
-                    <label class="text-sm text-gray-300 mb-1 block">Min Page Delay (seconds)</label>
-                    <input type="number" name="page_delay_min" value="{{ settings.page_delay_min or '3' }}" min="1" max="30" step="0.5"
-                        class="w-full bg-dark-400 border border-gray-600 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-accent">
-                </div>
-                <div>
-                    <label class="text-sm text-gray-300 mb-1 block">Max Page Delay (seconds)</label>
-                    <input type="number" name="page_delay_max" value="{{ settings.page_delay_max or '5' }}" min="2" max="60" step="0.5"
-                        class="w-full bg-dark-400 border border-gray-600 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-accent">
-                </div>
-            </div>
-            <p class="text-xs text-gray-500">Credentials are stored in the database. Higher delays reduce the risk of LinkedIn banning your account.</p>
-            <button type="submit"
-                class="bg-accent hover:bg-accent-hover text-white font-medium px-5 py-2.5 rounded-lg transition-colors text-sm">
-                Save LinkedIn Settings
-            </button>
-        </form>
-    </div>
-
-    <!-- LinkedIn Session -->
-    <div class="bg-dark-300 rounded-xl border border-gray-700/50 p-6 mb-6">
-        <h3 class="text-lg font-semibold text-white mb-4">LinkedIn Session</h3>
+        <p class="text-sm text-gray-400 mb-4">Add multiple LinkedIn accounts. The scraper rotates between active accounts each run to reduce bans.</p>
 
         <!-- Session status indicator -->
         <div class="flex items-center gap-3 bg-dark-400 rounded-lg px-4 py-3 mb-4" id="li-session-status">
@@ -157,16 +122,20 @@
             </div>
         </div>
 
-        <!-- Cookie paste method -->
-        <div class="mb-4">
-            <label class="text-sm text-gray-300 mb-1 block">LinkedIn Session Cookie (<code class="text-accent">li_at</code>)</label>
-            <div class="flex gap-2">
-                <input type="text" id="li-cookie-input" placeholder="Paste your li_at cookie value here..."
-                    class="flex-1 bg-dark-400 border border-gray-600 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-accent font-mono">
-                <button onclick="saveCookie()" id="li-cookie-btn"
-                    class="bg-accent hover:bg-accent-hover text-white font-medium px-5 py-2.5 rounded-lg transition-colors text-sm whitespace-nowrap">
-                    Save Session
-                </button>
+        <!-- Add account form -->
+        <div class="mb-4 bg-dark-400 rounded-lg p-4">
+            <div class="text-sm text-gray-300 font-medium mb-3">Add Account</div>
+            <div class="flex flex-col gap-2">
+                <input type="text" id="li-account-label" placeholder="Account label (e.g. Account 1, John's account...)"
+                    class="w-full bg-dark-300 border border-gray-600 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-accent">
+                <div class="flex gap-2">
+                    <input type="text" id="li-account-cookie" placeholder="Paste li_at cookie value here..."
+                        class="flex-1 bg-dark-300 border border-gray-600 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-accent font-mono">
+                    <button onclick="addAccount()" id="li-add-btn"
+                        class="bg-accent hover:bg-accent-hover text-white font-medium px-5 py-2.5 rounded-lg transition-colors text-sm whitespace-nowrap">
+                        Add Account
+                    </button>
+                </div>
             </div>
             <details class="mt-2">
                 <summary class="text-xs text-gray-500 cursor-pointer hover:text-gray-300">How to get your li_at cookie</summary>
@@ -176,31 +145,96 @@
                     <li>Go to the <strong class="text-gray-300">Application</strong> tab (Chrome) or <strong class="text-gray-300">Storage</strong> tab (Firefox)</li>
                     <li>In the left sidebar, expand <strong class="text-gray-300">Cookies</strong> → click <strong class="text-gray-300">https://www.linkedin.com</strong></li>
                     <li>Find the cookie named <code class="text-accent">li_at</code> and copy its <strong class="text-gray-300">Value</strong></li>
-                    <li>Paste it above and click Save Session</li>
+                    <li>Paste it above with a label and click Add Account</li>
                 </ol>
             </details>
         </div>
 
+        <!-- Accounts list -->
+        <div id="li-accounts-list" class="space-y-2">
+            <div class="text-sm text-gray-500 text-center py-4">Loading accounts...</div>
+        </div>
+
+        <!-- Scraper + credentials settings -->
+        <form method="POST" action="/settings/linkedin" class="mt-4 bg-dark-400 rounded-lg p-4" id="li-settings-form">
+            <div class="text-sm text-gray-300 font-medium mb-3">Scraper Settings</div>
+            <div class="mb-3">
+                <label class="text-sm text-gray-300 mb-1 block">Switch Account Every (pages)</label>
+                <input type="number" name="linkedin_switch_every_pages" value="{{ settings.linkedin_switch_every_pages or '5' }}" min="1" max="50" step="1"
+                    class="w-full bg-dark-300 border border-gray-600 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-accent">
+                <p class="text-xs text-gray-500 mt-1">Inside one job, the scraper switches to next active account after this many pages.</p>
+            </div>
+
+            <div class="flex items-center justify-between mb-2 mt-2">
+                <div class="text-sm text-gray-300 font-medium">Credential Slots</div>
+                <button type="button" id="li-add-credential-btn" onclick="addCredentialSlot()"
+                    class="bg-dark-300 hover:bg-dark-200 text-white font-medium px-3 py-1.5 rounded-lg transition-colors text-xs border border-gray-600">
+                    Add New Account
+                </button>
+            </div>
+            <input type="hidden" id="linkedin-credentials-count" name="linkedin_credentials_count" value="{{ settings.linkedin_credentials_count or '1' }}">
+            <div class="space-y-3 mb-3" id="linkedin-credential-slots">
+                {% for i in [1,2,3,4,5] %}
+                <div class="cred-slot hidden bg-dark-300 border border-gray-700/50 rounded-lg p-3" data-slot="{{ i }}">
+                    <div class="flex items-center justify-between mb-2">
+                        <div class="flex items-center gap-2">
+                            <div class="text-xs text-gray-300 font-medium">Account {{ i }}</div>
+                            <span class="cred-saved-badge hidden text-[10px] px-1.5 py-0.5 rounded bg-green-500/15 text-green-400">Saved</span>
+                        </div>
+                        <button type="button" onclick="removeCredentialSlot({{ i }})"
+                            class="text-xs text-red-400 hover:text-red-300 transition-colors">Remove</button>
+                    </div>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <div>
+                            <label class="text-xs text-gray-400 mb-1 block">Email</label>
+                            <input type="email" name="linkedin_email_{{ i }}" value="{{ settings['linkedin_email_' ~ i] or '' }}" placeholder="you{{ i }}@example.com"
+                                class="w-full bg-dark-400 border border-gray-600 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-accent">
+                        </div>
+                        <div>
+                            <label class="text-xs text-gray-400 mb-1 block">Password</label>
+                            <input type="password" name="linkedin_password_{{ i }}" value="{{ settings['linkedin_password_' ~ i] or '' }}" placeholder="Password for account {{ i }}"
+                                class="w-full bg-dark-400 border border-gray-600 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-accent">
+                        </div>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+
+            <!-- Legacy single-account fields for backward compatibility -->
+            <input type="hidden" name="linkedin_email" value="{{ settings.linkedin_email or '' }}">
+            <input type="hidden" name="linkedin_password" value="{{ settings.linkedin_password or '' }}">
+            <div class="grid grid-cols-2 gap-4 mb-3">
+                <div>
+                    <label class="text-sm text-gray-300 mb-1 block">Min Page Delay (seconds)</label>
+                    <input type="number" name="page_delay_min" value="{{ settings.page_delay_min or '3' }}" min="1" max="30" step="0.5"
+                        class="w-full bg-dark-300 border border-gray-600 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-accent">
+                </div>
+                <div>
+                    <label class="text-sm text-gray-300 mb-1 block">Max Page Delay (seconds)</label>
+                    <input type="number" name="page_delay_max" value="{{ settings.page_delay_max or '5' }}" min="2" max="60" step="0.5"
+                        class="w-full bg-dark-300 border border-gray-600 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-accent">
+                </div>
+            </div>
+            <p class="text-xs text-gray-500 mb-3">Higher delays reduce the risk of LinkedIn banning your accounts.</p>
+            <div class="flex flex-wrap gap-2">
+                <button type="submit" id="li-settings-save-btn"
+                    class="bg-accent hover:bg-accent-hover text-white font-medium px-5 py-2.5 rounded-lg transition-colors text-sm">
+                    Save LinkedIn Settings
+                </button>
+                <button type="button" id="li-login-btn" onclick="startManualLogin()"
+                    class="bg-dark-300 hover:bg-dark-200 text-white font-medium px-5 py-2.5 rounded-lg transition-colors text-sm border border-gray-600">
+                    Open Browser & Log In
+                </button>
+            </div>
+        </form>
+
         <!-- Login status text (shown during auto login) -->
-        <div class="bg-dark-400 rounded-lg px-4 py-3 mb-4 hidden" id="li-login-progress">
+        <div class="bg-dark-400 rounded-lg px-4 py-3 mb-4 mt-4 hidden" id="li-login-progress">
             <div class="flex items-center gap-2">
                 <svg class="w-4 h-4 text-accent animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"/></svg>
                 <span class="text-sm text-gray-300" id="li-login-message">Starting...</span>
             </div>
         </div>
-
-        <!-- Action buttons -->
-        <div class="flex items-center gap-3">
-            <button onclick="startManualLogin()" id="li-login-btn"
-                class="bg-gray-600 hover:bg-gray-500 text-white font-medium px-5 py-2.5 rounded-lg transition-colors text-sm">
-                Auto Login (with credentials)
-            </button>
-            <button onclick="clearLinkedInSession()" id="li-clear-btn"
-                class="bg-gray-600 hover:bg-gray-500 text-white font-medium px-4 py-2.5 rounded-lg transition-colors text-sm">
-                Clear Session
-            </button>
-        </div>
-        <p class="text-xs text-gray-500 mt-2">Paste the cookie above (recommended) or use Auto Login which may get blocked by CAPTCHA.</p>
     </div>
 
     <!-- Service Account Info -->
@@ -229,42 +263,209 @@ async function disconnectGoogle() {
     location.reload();
 }
 
-// ── LinkedIn Session ──
+// ── LinkedIn Accounts (Rotation) ──
 let loginPolling = null;
+const MAX_CREDENTIAL_SLOTS = 5;
 
-async function saveCookie() {
-    const input = document.getElementById('li-cookie-input');
-    const btn = document.getElementById('li-cookie-btn');
-    const val = input.value.trim();
-    if (!val) { alert('Please paste your li_at cookie value first.'); return; }
+function _credentialSlots() {
+    return Array.from(document.querySelectorAll('.cred-slot'));
+}
+
+function _syncCredentialButtonsAndCount() {
+    const slots = _credentialSlots();
+    const visible = slots.filter(s => !s.classList.contains('hidden')).length;
+    const countInput = document.getElementById('linkedin-credentials-count');
+    const addBtn = document.getElementById('li-add-credential-btn');
+    if (countInput) countInput.value = String(Math.max(1, visible));
+    if (addBtn) addBtn.disabled = visible >= MAX_CREDENTIAL_SLOTS;
+    if (addBtn) {
+        addBtn.className = addBtn.disabled
+            ? 'bg-gray-600 text-gray-300 font-medium px-3 py-1.5 rounded-lg text-xs border border-gray-600 cursor-not-allowed'
+            : 'bg-dark-300 hover:bg-dark-200 text-white font-medium px-3 py-1.5 rounded-lg transition-colors text-xs border border-gray-600';
+    }
+    slots.forEach((slot, idx) => {
+        const removeBtn = slot.querySelector('button[onclick^="removeCredentialSlot"]');
+        if (!removeBtn) return;
+        removeBtn.style.visibility = idx === 0 ? 'hidden' : 'visible';
+    });
+    updateCredentialSavedBadges();
+}
+
+function addCredentialSlot() {
+    const slots = _credentialSlots();
+    const hiddenSlot = slots.find(s => s.classList.contains('hidden'));
+    if (!hiddenSlot) {
+        _syncCredentialButtonsAndCount();
+        return;
+    }
+    hiddenSlot.classList.remove('hidden');
+    _syncCredentialButtonsAndCount();
+}
+
+function removeCredentialSlot(index) {
+    const slot = document.querySelector(`.cred-slot[data-slot="${index}"]`);
+    if (!slot) return;
+    const visibleSlots = _credentialSlots().filter(s => !s.classList.contains('hidden'));
+    if (visibleSlots.length <= 1) return;
+    slot.querySelectorAll('input').forEach(input => input.value = '');
+    slot.classList.add('hidden');
+    _syncCredentialButtonsAndCount();
+}
+
+function initCredentialSlots() {
+    const slots = _credentialSlots();
+    const countInput = document.getElementById('linkedin-credentials-count');
+    let configuredCount = parseInt((countInput && countInput.value) || '1', 10);
+    if (!Number.isFinite(configuredCount) || configuredCount < 1) configuredCount = 1;
+    configuredCount = Math.min(MAX_CREDENTIAL_SLOTS, configuredCount);
+
+    let maxFilled = 0;
+    for (let i = 1; i <= MAX_CREDENTIAL_SLOTS; i++) {
+        const email = document.querySelector(`input[name="linkedin_email_${i}"]`);
+        const password = document.querySelector(`input[name="linkedin_password_${i}"]`);
+        if ((email && email.value.trim()) || (password && password.value.trim())) {
+            maxFilled = i;
+        }
+    }
+    const visibleCount = Math.max(1, configuredCount, maxFilled);
+    slots.forEach((slot, idx) => {
+        if (idx < visibleCount) slot.classList.remove('hidden');
+        else slot.classList.add('hidden');
+    });
+    _syncCredentialButtonsAndCount();
+}
+
+function updateCredentialSavedBadges() {
+    _credentialSlots().forEach(slot => {
+        const email = slot.querySelector('input[name^="linkedin_email_"]');
+        const password = slot.querySelector('input[name^="linkedin_password_"]');
+        const badge = slot.querySelector('.cred-saved-badge');
+        if (!email || !password || !badge) return;
+        const isSaved = email.value.trim() && password.value.trim();
+        badge.classList.toggle('hidden', !isSaved);
+    });
+}
+
+function initLinkedinSettingsSaveUX() {
+    const form = document.getElementById('li-settings-form');
+    const btn = document.getElementById('li-settings-save-btn');
+    if (!form || !btn) return;
+
+    form.addEventListener('submit', () => {
+        btn.disabled = true;
+        btn.textContent = 'Saving...';
+        btn.className = 'bg-gray-600 text-gray-300 font-medium px-5 py-2.5 rounded-lg text-sm cursor-not-allowed';
+    });
+
+    const msg = new URLSearchParams(window.location.search).get('msg') || '';
+    if (msg.toLowerCase() === 'linkedin settings saved') {
+        btn.textContent = 'Saved!';
+        btn.className = 'bg-green-600 text-white font-medium px-5 py-2.5 rounded-lg text-sm';
+        setTimeout(() => {
+            btn.textContent = 'Save LinkedIn Settings';
+            btn.className = 'bg-accent hover:bg-accent-hover text-white font-medium px-5 py-2.5 rounded-lg transition-colors text-sm';
+            btn.disabled = false;
+        }, 1800);
+    }
+}
+
+async function addAccount() {
+    const labelInput = document.getElementById('li-account-label');
+    const cookieInput = document.getElementById('li-account-cookie');
+    const btn = document.getElementById('li-add-btn');
+    const label = labelInput.value.trim();
+    const li_at = cookieInput.value.trim();
+    if (!label) { alert('Please enter a label for this account.'); return; }
+    if (!li_at) { alert('Please paste the li_at cookie value.'); return; }
     btn.disabled = true;
-    btn.textContent = 'Saving...';
+    btn.textContent = 'Adding...';
     try {
-        const res = await fetch('/api/linkedin/save-cookie', {
+        const res = await fetch('/api/linkedin/accounts/add', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({li_at: val})
+            body: JSON.stringify({label, li_at})
         });
         const data = await res.json();
         if (data.ok) {
-            input.value = '';
-            btn.textContent = 'Saved!';
+            labelInput.value = '';
+            cookieInput.value = '';
+            btn.textContent = 'Added!';
             btn.className = 'bg-green-600 text-white font-medium px-5 py-2.5 rounded-lg text-sm whitespace-nowrap';
+            loadAccounts();
             checkSessionStatus();
             setTimeout(() => {
-                btn.textContent = 'Save Session';
+                btn.textContent = 'Add Account';
                 btn.className = 'bg-accent hover:bg-accent-hover text-white font-medium px-5 py-2.5 rounded-lg transition-colors text-sm whitespace-nowrap';
                 btn.disabled = false;
-            }, 2000);
+            }, 1500);
         } else {
-            alert(data.error || 'Failed to save cookie');
-            btn.textContent = 'Save Session';
+            alert(data.error || 'Failed to add account');
+            btn.textContent = 'Add Account';
             btn.disabled = false;
         }
     } catch (e) {
         alert('Network error');
-        btn.textContent = 'Save Session';
+        btn.textContent = 'Add Account';
         btn.disabled = false;
+    }
+}
+
+async function deleteAccount(id, label) {
+    if (!confirm(`Delete account "${label}"?`)) return;
+    await fetch(`/api/linkedin/accounts/${id}/delete`, {method: 'POST'});
+    loadAccounts();
+    checkSessionStatus();
+}
+
+async function toggleAccount(id, currentActive) {
+    await fetch(`/api/linkedin/accounts/${id}/toggle`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({is_active: !currentActive})
+    });
+    loadAccounts();
+    checkSessionStatus();
+}
+
+async function loadAccounts() {
+    const container = document.getElementById('li-accounts-list');
+    try {
+        const res = await fetch('/api/linkedin/accounts');
+        const data = await res.json();
+        const accounts = data.accounts || [];
+        if (!accounts.length) {
+            container.innerHTML = '<div class="text-sm text-gray-500 text-center py-4">No accounts added yet. Add your first LinkedIn account above.</div>';
+            return;
+        }
+        let html = '';
+        for (const acc of accounts) {
+            const active = acc.is_active;
+            const statusColor = active ? 'bg-green-500' : 'bg-gray-500';
+            const statusText = active ? 'Active' : 'Paused';
+            const toggleText = active ? 'Pause' : 'Activate';
+            const toggleColor = active ? 'text-yellow-400 hover:bg-yellow-500/10' : 'text-green-400 hover:bg-green-500/10';
+            const lastUsed = acc.last_used_at ? new Date(acc.last_used_at + 'Z').toLocaleString() : 'Never';
+            html += `
+                <div class="flex items-center justify-between bg-dark-400 rounded-lg px-4 py-3">
+                    <div class="flex items-center gap-3 min-w-0 flex-1">
+                        <div class="w-2.5 h-2.5 rounded-full ${statusColor} flex-shrink-0"></div>
+                        <div class="min-w-0">
+                            <div class="text-sm text-white font-medium truncate">${acc.label}</div>
+                            <div class="text-xs text-gray-500">Cookie: ${acc.li_at_preview} &middot; Used: ${acc.use_count}x &middot; Last: ${lastUsed}</div>
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-2 flex-shrink-0 ml-3">
+                        <span class="text-xs px-2 py-1 rounded ${active ? 'bg-green-500/10 text-green-400' : 'bg-gray-500/10 text-gray-400'}">${statusText}</span>
+                        <button onclick="toggleAccount(${acc.id}, ${active})"
+                            class="text-xs px-2 py-1 rounded ${toggleColor} transition-colors">${toggleText}</button>
+                        <button onclick="deleteAccount(${acc.id}, '${acc.label.replace(/'/g, "\\'")}')"
+                            class="text-xs px-2 py-1 rounded text-red-400 hover:bg-red-500/10 transition-colors">Delete</button>
+                    </div>
+                </div>`;
+        }
+        container.innerHTML = html;
+    } catch (e) {
+        container.innerHTML = '<div class="text-sm text-red-400 text-center py-4">Failed to load accounts</div>';
     }
 }
 
@@ -277,12 +478,16 @@ async function checkSessionStatus() {
         if (data.has_session) {
             icon.innerHTML = '<svg class="w-4 h-4 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>';
             icon.className = 'w-8 h-8 rounded-full bg-green-500/20 flex items-center justify-center';
-            label.textContent = 'Session active — saved cookies found';
+            if (data.active_count > 0) {
+                label.textContent = `${data.active_count} of ${data.account_count} accounts active — rotation enabled`;
+            } else {
+                label.textContent = 'Session active — legacy single cookie';
+            }
             label.className = 'text-sm text-green-400 font-medium';
         } else {
             icon.innerHTML = '<svg class="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>';
             icon.className = 'w-8 h-8 rounded-full bg-gray-600/30 flex items-center justify-center';
-            label.textContent = 'No session — log in to create one';
+            label.textContent = 'No session — add an account above';
             label.className = 'text-sm text-gray-300';
         }
     } catch (e) {}
@@ -346,7 +551,10 @@ async function clearLinkedInSession() {
 }
 
 // Check on page load
+initCredentialSlots();
+initLinkedinSettingsSaveUX();
 checkSessionStatus();
+loadAccounts();
 
 // Also check if a manual login is still running (from before page load)
 (async function checkStaleLogin() {

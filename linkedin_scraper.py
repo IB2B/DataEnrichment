@@ -591,6 +591,70 @@ async def _enrich_contacts(page, profiles: list, serpapi_key: str, scrape_id: in
             log.warning(f"    Enrichment error for {profile.get('full_name', '?')}: {exc}")
 
 
+def _load_linkedin_credentials_pool() -> list:
+    """Load LinkedIn credential pairs from settings."""
+    pool = []
+    try:
+        count = int(db.get_setting("linkedin_credentials_count", "1"))
+    except Exception:
+        count = 1
+    count = max(1, min(count, 5))
+
+    for i in range(1, count + 1):
+        email = db.get_setting(f"linkedin_email_{i}", "").strip()
+        password = db.get_setting(f"linkedin_password_{i}", "").strip()
+        if email and password:
+            pool.append((email, password))
+
+    if not pool:
+        legacy_email = db.get_setting("linkedin_email", "").strip()
+        legacy_password = db.get_setting("linkedin_password", "").strip()
+        if legacy_email and legacy_password:
+            pool.append((legacy_email, legacy_password))
+    return pool
+
+
+async def _apply_next_linkedin_account_cookie(context, scrape_id: int) -> bool:
+    """Rotate to the next active LinkedIn account cookie."""
+    account = db.get_next_linkedin_account()
+    if account:
+        li_at_cookie = account["li_at_cookie"]
+        log.info(
+            f"LinkedIn scrape #{scrape_id} - using account '{account['label']}' "
+            f"(id={account['id']}, uses={account['use_count']})"
+        )
+    else:
+        li_at_cookie = db.get_setting("linkedin_li_at", "")
+        if li_at_cookie:
+            log.info(f"LinkedIn scrape #{scrape_id} - using legacy single li_at cookie")
+
+    if not li_at_cookie:
+        return False
+
+    await context.clear_cookies()
+    await context.add_cookies([
+        {
+            "name": "li_at",
+            "value": li_at_cookie,
+            "domain": ".linkedin.com",
+            "path": "/",
+            "httpOnly": True,
+            "secure": True,
+            "sameSite": "None",
+        },
+        {
+            "name": "JSESSIONID",
+            "value": f"ajax:{li_at_cookie[:16]}",
+            "domain": ".linkedin.com",
+            "path": "/",
+            "httpOnly": False,
+            "secure": True,
+            "sameSite": "None",
+        },
+    ])
+    return True
+
+
 async def run_linkedin_scrape(scrape_id: int):
     """Main LinkedIn scraping function."""
     from playwright.async_api import async_playwright
@@ -602,9 +666,15 @@ async def run_linkedin_scrape(scrape_id: int):
 
     search_url = scrape["search_url"]
     max_pages = scrape["max_pages"] or 100
-    li_email = db.get_setting("linkedin_email", "")
-    li_password = db.get_setting("linkedin_password", "")
+    credentials_pool = _load_linkedin_credentials_pool()
+    credential_idx = 0
     serpapi_key = db.get_setting("serpapi_key", "")
+    try:
+        switch_every_pages = int(float(db.get_setting("linkedin_switch_every_pages", "5")))
+    except Exception:
+        switch_every_pages = 5
+    switch_every_pages = max(1, min(switch_every_pages, 50))
+    active_cookie_accounts = len(db.get_active_linkedin_accounts())
 
     delay_min = float(db.get_setting("page_delay_min", str(DEFAULT_PAGE_DELAY_MIN)))
     delay_max = float(db.get_setting("page_delay_max", str(DEFAULT_PAGE_DELAY_MAX)))
@@ -653,39 +723,50 @@ async def run_linkedin_scrape(scrape_id: int):
             window.chrome = { runtime: {} };
         """)
 
-        # Inject li_at cookie from database if available (set via Settings page)
-        li_at_cookie = db.get_setting("linkedin_li_at", "")
-        if li_at_cookie:
-            log.info(f"LinkedIn scrape #{scrape_id} — injecting li_at cookie from Settings")
-            await context.add_cookies([
-                {
-                    "name": "li_at",
-                    "value": li_at_cookie,
-                    "domain": ".linkedin.com",
-                    "path": "/",
-                    "httpOnly": True,
-                    "secure": True,
-                    "sameSite": "None",
-                },
-                {
-                    "name": "JSESSIONID",
-                    "value": f"ajax:{li_at_cookie[:16]}",
-                    "domain": ".linkedin.com",
-                    "path": "/",
-                    "httpOnly": False,
-                    "secure": True,
-                    "sameSite": "None",
-                },
-            ])
+        # Pick initial account cookie from the rotation pool.
+        await _apply_next_linkedin_account_cookie(context, scrape_id)
 
-        # Check if already logged in
-        await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=30000)
-        await asyncio.sleep(random.uniform(2, 4))
-
-        current_url = page.url
-        log.info(f"LinkedIn scrape #{scrape_id} — feed redirect URL: {current_url}")
-        needs_login = "/login" in current_url or "/uas/" in current_url or "signin" in current_url
-        hit_checkpoint = "checkpoint" in current_url or "challenge" in current_url
+        # Check if already logged in. Some stale cookies cause redirect loops on /feed.
+        needs_login = False
+        hit_checkpoint = False
+        try:
+            await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=30000)
+            await asyncio.sleep(random.uniform(2, 4))
+            current_url = page.url
+            log.info(f"LinkedIn scrape #{scrape_id} — feed redirect URL: {current_url}")
+            needs_login = "/login" in current_url or "/uas/" in current_url or "signin" in current_url
+            hit_checkpoint = "checkpoint" in current_url or "challenge" in current_url
+        except Exception as exc:
+            if "ERR_TOO_MANY_REDIRECTS" not in str(exc):
+                raise
+            log.warning(
+                f"LinkedIn scrape #{scrape_id} - redirect loop on /feed; "
+                f"trying another account cookie then login fallback"
+            )
+            recovered = False
+            if active_cookie_accounts > 1:
+                try:
+                    switched = await _apply_next_linkedin_account_cookie(context, scrape_id)
+                    if switched:
+                        await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=30000)
+                        await asyncio.sleep(random.uniform(2, 4))
+                        current_url = page.url
+                        log.info(f"LinkedIn scrape #{scrape_id} - retry feed URL: {current_url}")
+                        needs_login = "/login" in current_url or "/uas/" in current_url or "signin" in current_url
+                        hit_checkpoint = "checkpoint" in current_url or "challenge" in current_url
+                        recovered = True
+                except Exception as retry_exc:
+                    if "ERR_TOO_MANY_REDIRECTS" in str(retry_exc):
+                        recovered = False
+                    else:
+                        raise
+            if not recovered:
+                await context.clear_cookies()
+                await page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded", timeout=30000)
+                await asyncio.sleep(random.uniform(1, 2))
+                current_url = page.url
+                needs_login = True
+                hit_checkpoint = "checkpoint" in current_url or "challenge" in current_url
 
         if hit_checkpoint:
             # Cookies exist but LinkedIn wants verification — wait and retry
@@ -704,12 +785,14 @@ async def run_linkedin_scrape(scrape_id: int):
                 return
 
         if needs_login:
-            if not li_email or not li_password:
+            if not credentials_pool:
                 db.update_linkedin_scrape(scrape_id, status="error",
-                    error_message="LinkedIn credentials not configured. Go to Settings.",
+                    error_message="LinkedIn credentials not configured. Go to Settings and fill credential slots.",
                     finished_at=datetime.now().isoformat())
                 return
 
+            li_email, li_password = credentials_pool[credential_idx % len(credentials_pool)]
+            credential_idx += 1
             log.info(f"LinkedIn scrape #{scrape_id} — logging in as {li_email}")
             await page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded", timeout=30000)
             await asyncio.sleep(random.uniform(1, 2))
@@ -741,7 +824,7 @@ async def run_linkedin_scrape(scrape_id: int):
 
             if "/login" in post_url:
                 db.update_linkedin_scrape(scrape_id, status="error",
-                    error_message="LinkedIn login failed. Check your credentials in Settings.",
+                    error_message="LinkedIn login failed. Check your credentials in Settings credential slots.",
                     finished_at=datetime.now().isoformat())
                 return
 
@@ -832,6 +915,14 @@ async def run_linkedin_scrape(scrape_id: int):
                 total_scraped += len(page_people)
                 db.update_linkedin_scrape(scrape_id, total_scraped=total_scraped)
                 log.info(f"LinkedIn scrape #{scrape_id} — saved {len(page_people)} enriched profiles (total: {total_scraped})")
+
+            if active_cookie_accounts > 1 and page_num < max_pages and page_num % switch_every_pages == 0:
+                current_results_url = page.url
+                switched = await _apply_next_linkedin_account_cookie(context, scrape_id)
+                if switched:
+                    log.info(f"LinkedIn scrape #{scrape_id} - switched account after page {page_num}")
+                    await page.goto(current_results_url, wait_until="domcontentloaded", timeout=30000)
+                    await asyncio.sleep(random.uniform(2, 3))
 
             # Try to go to next page
             next_clicked = False
@@ -927,13 +1018,12 @@ async def run_manual_login(status_dict: dict):
     status_dict["status"] = "opening"
     status_dict["message"] = "Logging in to LinkedIn..."
 
-    li_email = db.get_setting("linkedin_email", "")
-    li_password = db.get_setting("linkedin_password", "")
-
-    if not li_email or not li_password:
+    credentials_pool = _load_linkedin_credentials_pool()
+    if not credentials_pool:
         status_dict["status"] = "error"
-        status_dict["message"] = "LinkedIn email and password must be configured in Settings first."
+        status_dict["message"] = "LinkedIn credentials must be configured in Settings first."
         return
+    li_email, li_password = credentials_pool[0]
 
     pw = await async_playwright().start()
 

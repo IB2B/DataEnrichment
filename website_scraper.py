@@ -1,229 +1,353 @@
 """
-Website Scraper — aiohttp + BeautifulSoup engine
-Extracts emails, phone numbers, names, and social media links from websites.
+Website Scraper - domain-first bulk email extraction.
+Based on proven Scrapling flow:
+- normalize to domain
+- scrape homepage first
+- scrape minimal contact paths only if needed
+- keep up to 5 unique emails per domain
 """
 
-import re, asyncio, random, logging
+import asyncio
+import html
+import logging
+import random
+import re
 from datetime import datetime
-from urllib.parse import urljoin, urlparse
+from pathlib import Path
+from urllib.parse import quote, unquote, urljoin, urlparse
 
-import aiohttp
-from bs4 import BeautifulSoup
+from scrapling.fetchers import AsyncFetcher
 
 import database as db
-from enrichment_worker import KNOWN_FIRST_NAMES, is_name, ProxyPool
+from config import PROXY_FILE
 
 log = logging.getLogger("enrichment.webscraper")
 
-EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
-PHONE_RE = re.compile(
-    r"(?:\+?\d{1,3}[\s\-.]?)?"
-    r"(?:\(?\d{2,4}\)?[\s\-.]?)"
-    r"\d{3,4}[\s\-.]?\d{3,4}"
-)
-SOCIAL_RE = re.compile(
-    r"https?://(?:www\.)?"
-    r"(?:linkedin\.com/(?:in|company)/[^\s\"'<>]+|"
-    r"facebook\.com/[^\s\"'<>]+|"
-    r"twitter\.com/[^\s\"'<>]+|"
-    r"x\.com/[^\s\"'<>]+|"
-    r"instagram\.com/[^\s\"'<>]+)",
+EMAIL_RE = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
+OBFUSC_AT = re.compile(r"\s*[\[\(\{]\s*(?:at|AT|@)\s*[\]\)\}]\s*")
+OBFUSC_DOT = re.compile(r"\s*[\[\(\{]\s*(?:dot|DOT|\.)\s*[\]\)\}]\s*")
+HTML_AT_RE = re.compile(r"&#(?:64|x40);")
+
+JUNK_DOM = {
+    "example.com", "sentry.io", "wixpress.com", "wordpress.org", "w3.org",
+    "schema.org", "googleapis.com", "google.com", "facebook.com",
+    "twitter.com", "cloudflare.com", "gravatar.com", "instagram.com",
+    "jquery.com", "jsdelivr.net", "bootstrapcdn.com", "fontawesome.com",
+    "gstatic.com", "ytimg.com", "googletagmanager.com", "doubleclick.net",
+    "amazon.com", "amazonaws.com", "github.com", "linkedin.com",
+}
+
+JUNK_PREFIX = {
+    "noreply", "no-reply", "donotreply", "mailer-daemon", "postmaster",
+    "webmaster", "hostmaster", "abuse", "root", "daemon",
+}
+
+CONCURRENCY = 250
+FETCH_TIMEOUT = 4
+MAX_EMAILS_PER_DOMAIN = 5
+PATHS_STEP1 = [
+    "contact", "contact-us", "contatti", "about", "impressum", "kontakt",
+]
+CONTACT_KW = re.compile(
+    r"contatt|contact|about|chi-siamo|azienda|impressum|kontakt|support|help",
     re.I,
 )
-
-JUNK_DOMAINS = {"example.com", "sentry.io", "wixpress.com", "wordpress.org", "w3.org",
-                "schema.org", "googleapis.com", "google.com", "cloudflare.com", "gravatar.com"}
-
-TEAM_KW = re.compile(
-    r"chi.siamo|about|team|staff|contatt|contact|azienda|company|persone|people", re.I)
-
-UA_LIST = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/119.0.0.0 Safari/537.36",
-]
+MAX_DYNAMIC_CONTACT_LINKS = 3
+MAX_FALLBACK_CONTACT_PATHS = 3
 
 
-def _clean_email(e):
-    e = e.lower().strip()
-    domain = e.split("@")[-1]
-    if domain in JUNK_DOMAINS:
-        return None
-    if domain.endswith((".png", ".jpg", ".css", ".js", ".gif")):
-        return None
-    if len(e.split("@")[0]) < 2:
-        return None
-    return e
+def _build_proxies():
+    """Load proxies from proxies.txt.
+    Supports:
+    - ip:port:user:pass
+    - ip:port
+    """
+    path = Path(PROXY_FILE)
+    if not path.exists():
+        return []
+
+    proxies = []
+    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(":")
+        if len(parts) == 4:
+            ip, port, user, pwd = parts
+            user = quote(user, safe="")
+            pwd = quote(pwd, safe="")
+            proxies.append(f"http://{user}:{pwd}@{ip}:{port}")
+        elif len(parts) == 2:
+            ip, port = parts
+            proxies.append(f"http://{ip}:{port}")
+    return proxies
 
 
-def _clean_phone(p):
-    digits = re.sub(r"[^\d+]", "", p)
-    if len(digits) < 7 or len(digits) > 16:
-        return None
-    return p.strip()
+_PROXY_LIST = _build_proxies()
 
 
-def _extract_logo(soup, base_url=""):
-    """Extract logo URL from the page using common patterns."""
-    # 1. Open Graph image (often the logo or brand image)
-    og = soup.find("meta", property="og:image")
-    if og and og.get("content"):
-        return urljoin(base_url, og["content"])
-
-    # 2. <img> tags with logo-related class/id/alt
-    for img in soup.find_all("img", src=True):
-        attrs_text = " ".join([
-            img.get("class", [""])[0] if isinstance(img.get("class"), list) else img.get("class", ""),
-            img.get("id", ""),
-            img.get("alt", ""),
-        ]).lower()
-        if "logo" in attrs_text:
-            return urljoin(base_url, img["src"])
-
-    # 3. <link rel="icon"> (favicon)
-    for rel in ["icon", "shortcut icon", "apple-touch-icon"]:
-        link = soup.find("link", rel=lambda r: r and rel in " ".join(r).lower() if isinstance(r, list) else r and rel in r.lower())
-        if link and link.get("href"):
-            return urljoin(base_url, link["href"])
-
-    # 4. Fallback: /favicon.ico
-    if base_url:
-        parsed = urlparse(base_url)
-        return f"{parsed.scheme}://{parsed.netloc}/favicon.ico"
-
-    return ""
+def _get_proxy():
+    return random.choice(_PROXY_LIST) if _PROXY_LIST else None
 
 
-def _extract_from_soup(soup, base_url=""):
-    text = soup.get_text(separator=" ", strip=True)
-    domain = urlparse(base_url).netloc.lower().replace("www.", "") if base_url else ""
-
-    # Emails
-    emails = set()
-    for e in EMAIL_RE.findall(text):
-        cleaned = _clean_email(e)
-        if cleaned:
-            emails.add(cleaned)
-    for a in soup.find_all("a", href=True):
-        if a["href"].startswith("mailto:"):
-            e = a["href"].replace("mailto:", "").split("?")[0].strip()
-            cleaned = _clean_email(e)
-            if cleaned:
-                emails.add(cleaned)
-
-    # Phones
-    phones = set()
-    for p in PHONE_RE.findall(text):
-        cleaned = _clean_phone(p)
-        if cleaned:
-            phones.add(cleaned)
-    for a in soup.find_all("a", href=True):
-        if a["href"].startswith("tel:"):
-            raw = a["href"].replace("tel:", "").strip()
-            if raw:
-                phones.add(raw)
-
-    # Names
-    names = set()
-    for tag in soup.find_all(["h2", "h3", "h4", "h5", "strong", "b", "span"]):
-        t = tag.get_text(strip=True)
-        if is_name(t):
-            names.add(t)
-
-    # Social links
-    social = set()
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        if SOCIAL_RE.match(href):
-            social.add(href.split("?")[0])
-    for m in SOCIAL_RE.findall(text):
-        social.add(m.split("?")[0])
-
-    # Logo
-    logo_url = _extract_logo(soup, base_url)
-
-    return emails, phones, names, social, logo_url
+def _normalize_domain(url_or_domain: str) -> str:
+    value = (url_or_domain or "").strip().lower()
+    value = re.sub(r"^https?://", "", value)
+    return value.split("/")[0].strip().rstrip(".")
 
 
-def _find_subpages(soup, base_url):
-    """Find internal team/contact/about pages."""
-    domain = urlparse(base_url).netloc.lower()
-    links = set()
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        text = a.get_text(strip=True).lower()
-        if TEAM_KW.search(text) or TEAM_KW.search(href):
-            if href.startswith("/"):
-                href = urljoin(base_url, href)
-            elif not href.startswith("http"):
-                href = urljoin(base_url, href)
-            if domain in urlparse(href).netloc.lower():
-                links.add(href)
-    # Also try common paths
-    for path in ["/contact", "/contatti", "/chi-siamo", "/about", "/team"]:
-        links.add(urljoin(base_url.rstrip("/") + "/", path))
-    return list(links)[:3]
+def _ok_email(value: str) -> bool:
+    email = value.lower().strip()
+    if len(email) < 5 or len(email) > 100:
+        return False
+    if "@" not in email:
+        return False
+    pre, dom = email.rsplit("@", 1)
+    if not pre or not dom or "." not in dom:
+        return False
+    if pre in JUNK_PREFIX or dom in JUNK_DOM:
+        return False
+    if dom.endswith((".png", ".jpg", ".jpeg", ".gif", ".css", ".js", ".svg", ".webp")):
+        return False
+    return len(pre) <= 64
 
 
-async def _fetch_page(session, url, timeout=8, proxy=None):
-    headers = {"User-Agent": random.choice(UA_LIST),
-               "Accept": "text/html,*/*;q=0.8",
-               "Accept-Language": "it-IT,it;q=0.9,en;q=0.7"}
+def _clean_email(value: str) -> str:
+    email = unquote(value).strip().lower()
+    email = email.strip(" \t\r\n\"'<>[](){}.,;:")
+    return email if _ok_email(email) else ""
+
+
+def _decode_cfemail(hex_value: str) -> str:
+    """Decode Cloudflare protected email payload from data-cfemail."""
     try:
-        async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout),
-                               ssl=False, allow_redirects=True, proxy=proxy) as resp:
-            if resp.status == 200:
-                text = await resp.text(errors="replace")
-                if len(text) > 300:
-                    return BeautifulSoup(text, "lxml")
+        if not hex_value or len(hex_value) < 4 or len(hex_value) % 2:
+            return ""
+        key = int(hex_value[:2], 16)
+        out = []
+        for i in range(2, len(hex_value), 2):
+            out.append(chr(int(hex_value[i:i + 2], 16) ^ key))
+        return "".join(out)
+    except Exception:
+        return ""
+
+
+def _extract_emails_from_page(page):
+    found = []
+    seen = set()
+
+    def add(email: str):
+        if not email or email in seen:
+            return
+        seen.add(email)
+        found.append(email)
+
+    try:
+        for a in page.css('a[href^="mailto:"]'):
+            href = a.attrib.get("href", "")
+            email = _clean_email(href.replace("mailto:", "").split("?", 1)[0])
+            if email:
+                add(email)
     except Exception:
         pass
+
+    # Cloudflare obfuscated email block.
+    try:
+        for el in page.css("[data-cfemail]"):
+            encoded = (el.attrib.get("data-cfemail", "") or "").strip()
+            decoded = _clean_email(_decode_cfemail(encoded))
+            if decoded:
+                add(decoded)
+    except Exception:
+        pass
+
+    text = ""
+    raw_html = ""
+    try:
+        text = page.get_all_text() or ""
+    except Exception:
+        pass
+    try:
+        raw_html = str(page.body) if hasattr(page, "body") else (page.text or "")
+    except Exception:
+        pass
+
+    blobs = [text, raw_html, html.unescape(raw_html)]
+    if raw_html:
+        blobs.append(html.unescape(HTML_AT_RE.sub("@", raw_html)))
+    if text:
+        deobf = OBFUSC_AT.sub("@", OBFUSC_DOT.sub(".", text))
+        blobs.append(deobf)
+
+    for blob in blobs:
+        if not blob:
+            continue
+        for match in EMAIL_RE.findall(blob):
+            email = _clean_email(match)
+            if email:
+                add(email)
+
+    return found
+
+
+def _find_contact_links(page, base_url: str, max_links: int = MAX_DYNAMIC_CONTACT_LINKS):
+    """Discover relevant internal contact/about URLs from homepage."""
+    links = []
+    seen = set()
+    base_domain = urlparse(base_url).netloc.lower()
+
+    try:
+        for a in page.css("a[href]"):
+            href = (a.attrib.get("href", "") or "").strip()
+            txt = (getattr(a, "text", "") or "").strip().lower()
+            if not href or href.startswith(("#", "javascript:", "mailto:", "tel:")):
+                continue
+            abs_url = href if href.startswith("http") else urljoin(base_url, href)
+            parsed = urlparse(abs_url)
+            if parsed.netloc.lower() != base_domain:
+                continue
+            normalized = abs_url.split("#")[0].rstrip("/")
+            if normalized in seen:
+                continue
+            if CONTACT_KW.search(txt) or CONTACT_KW.search(parsed.path):
+                seen.add(normalized)
+                links.append(normalized)
+                if len(links) >= max_links:
+                    break
+    except Exception:
+        pass
+
+    return links
+
+
+async def _fetch(url: str, retries: int = 1, allow_direct_fallback: bool = False):
+    """Fetch URL with fast retries and rotating proxies."""
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/122.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "it-IT,it;q=0.9,en;q=0.8",
+    }
+
+    for _ in range(retries + 1):
+        try:
+            page = await AsyncFetcher.get(
+                url,
+                stealthy_headers=False,
+                headers=headers,
+                follow_redirects=True,
+                timeout=FETCH_TIMEOUT,
+                proxy=_get_proxy(),
+            )
+            if page.status in (200, 201, 202):
+                return page
+            if page.status in (404, 410, 500, 502):
+                return None
+        except Exception:
+            continue
+
+    if allow_direct_fallback:
+        try:
+            page = await AsyncFetcher.get(
+                url,
+                stealthy_headers=False,
+                headers=headers,
+                follow_redirects=True,
+                timeout=FETCH_TIMEOUT,
+            )
+            if page.status in (200, 201, 202):
+                return page
+        except Exception:
+            pass
     return None
 
 
-async def _scrape_one_url(session, url, scrape_id, pp=None):
-    """Scrape a single URL + its sub-pages."""
-    if not url.startswith("http"):
-        url = "https://" + url
+async def _fetch_homepage(domain: str):
+    """Try minimal homepage variants for speed."""
+    candidates = [
+        f"https://{domain}/",
+        f"http://{domain}/",
+    ]
+    if not domain.startswith("www."):
+        candidates.append(f"https://www.{domain}/")
 
-    all_emails, all_phones, all_names, all_social = set(), set(), set(), set()
-    logo_url = ""
-    proxy = pp.get() if pp else None
+    for candidate in candidates:
+        page = await _fetch(candidate, retries=0, allow_direct_fallback=False)
+        if page:
+            return candidate, page
+    return f"https://{domain}/", None
 
-    soup = await _fetch_page(session, url, proxy=proxy)
-    if soup:
-        emails, phones, names, social, logo = _extract_from_soup(soup, url)
-        all_emails.update(emails)
-        all_phones.update(phones)
-        all_names.update(names)
-        all_social.update(social)
-        if logo:
-            logo_url = logo
 
-        # Follow sub-pages
-        subpages = _find_subpages(soup, url)
-        for sub_url in subpages:
-            sub_soup = await _fetch_page(session, sub_url, timeout=6, proxy=pp.get() if pp else None)
-            if sub_soup:
-                e, p, n, s, _ = _extract_from_soup(sub_soup, url)
-                all_emails.update(e)
-                all_phones.update(p)
-                all_names.update(n)
-                all_social.update(s)
-            await asyncio.sleep(0.1)
+async def _scrape_one_domain(input_value: str, scrape_id: int):
+    domain = _normalize_domain(input_value)
+    if not domain:
+        db.save_website_result(scrape_id, input_value, "", "", "", "", "")
+        return 0
+
+    homepage, page = await _fetch_homepage(domain)
+    collected = []
+    seen = set()
+
+    def add_batch(batch):
+        for email in batch:
+            if email in seen:
+                continue
+            seen.add(email)
+            collected.append(email)
+            if len(collected) >= MAX_EMAILS_PER_DOMAIN:
+                break
+
+    if page:
+        add_batch(_extract_emails_from_page(page))
+
+    if len(collected) < MAX_EMAILS_PER_DOMAIN:
+        candidates = []
+        if page:
+            candidates.extend(_find_contact_links(page, homepage))
+        candidates.extend([f"https://{domain}/{path}" for path in PATHS_STEP1[:MAX_FALLBACK_CONTACT_PATHS]])
+
+        unique_candidates = []
+        seen_urls = set()
+        for url in candidates:
+            n = url.rstrip("/")
+            if n not in seen_urls and n != homepage.rstrip("/"):
+                seen_urls.add(n)
+                unique_candidates.append(url)
+
+        async def _fetch_and_extract(step_url):
+            p = await _fetch(step_url, retries=0, allow_direct_fallback=False)
+            if not p:
+                return []
+            return _extract_emails_from_page(p)
+
+        results = await asyncio.gather(
+            *[_fetch_and_extract(u) for u in unique_candidates[:MAX_DYNAMIC_CONTACT_LINKS + MAX_FALLBACK_CONTACT_PATHS]],
+            return_exceptions=True
+        )
+        for result in results:
+            if isinstance(result, list):
+                add_batch(result)
+            if len(collected) >= MAX_EMAILS_PER_DOMAIN:
+                break
 
     db.save_website_result(
-        scrape_id, url,
-        ", ".join(sorted(all_emails)),
-        ", ".join(sorted(all_phones)),
-        ", ".join(sorted(all_names)),
-        ", ".join(sorted(all_social)),
-        logo_url,
+        scrape_id,
+        homepage,
+        ", ".join(collected),
+        "",
+        "",
+        "",
+        "",
     )
-    return len(all_emails)
+    log.info(f"  {domain} -> {len(collected)} emails")
+    return len(collected)
 
 
 async def run_website_scrape(scrape_id: int):
-    """Main entry point for website scraping."""
+    """Main entry point - handles up to 1000 domains."""
     import json
 
     scrape = db.get_website_scrape(scrape_id)
@@ -233,39 +357,43 @@ async def run_website_scrape(scrape_id: int):
 
     urls = json.loads(scrape["urls"])
     total = len(urls)
-    log.info(f"Website scrape #{scrape_id} starting — {total} URLs")
+    log.info(f"Website scrape #{scrape_id} starting - {total} URLs, {len(_PROXY_LIST)} proxies")
 
     try:
-        pp = ProxyPool()
-        connector = aiohttp.TCPConnector(limit=20, limit_per_host=3, ttl_dns_cache=300)
-        async with aiohttp.ClientSession(connector=connector) as session:
-            sem = asyncio.Semaphore(20)
-            processed = 0
+        sem = asyncio.Semaphore(CONCURRENCY)
+        processed = 0
 
-            async def bounded(url):
-                async with sem:
-                    return await _scrape_one_url(session, url, scrape_id, pp=pp)
+        async def bounded(value):
+            async with sem:
+                return await _scrape_one_domain(value, scrape_id)
 
-            # Process in batches
-            for i in range(0, total, 20):
-                batch = urls[i:i+20]
-                await asyncio.gather(*[bounded(u) for u in batch])
-                processed += len(batch)
-                db.update_website_scrape(scrape_id, processed=processed)
+        batch_size = CONCURRENCY
+        for i in range(0, total, batch_size):
+            batch = urls[i:i + batch_size]
+            await asyncio.gather(*[bounded(u) for u in batch], return_exceptions=True)
+            processed += len(batch)
+            db.update_website_scrape(scrape_id, processed=processed)
 
-                # Check if stopped
-                current = db.get_website_scrape(scrape_id)
-                if current and current["status"] != "running":
-                    break
+            current = db.get_website_scrape(scrape_id)
+            if current and current["status"] != "running":
+                break
 
-        db.update_website_scrape(scrape_id, status="done", processed=processed,
-                                 finished_at=datetime.now().isoformat())
-        log.info(f"Website scrape #{scrape_id} DONE — {processed}/{total} URLs processed")
-
+        db.update_website_scrape(
+            scrape_id,
+            status="done",
+            processed=processed,
+            finished_at=datetime.now().isoformat(),
+        )
+        log.info(f"Website scrape #{scrape_id} DONE - {processed}/{total} processed")
     except Exception as e:
         import traceback
+
         error_msg = f"{type(e).__name__}: {str(e)}"
         log.error(f"Website scrape #{scrape_id} FAILED: {error_msg}")
         log.error(traceback.format_exc())
-        db.update_website_scrape(scrape_id, status="error", error_message=error_msg[:500],
-                                 finished_at=datetime.now().isoformat())
+        db.update_website_scrape(
+            scrape_id,
+            status="error",
+            error_message=error_msg[:500],
+            finished_at=datetime.now().isoformat(),
+        )

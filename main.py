@@ -306,9 +306,14 @@ async def settings_page(request: Request, msg: str = ""):
         "default_sheet": db.get_setting("default_sheet", "Cleaned_Data"),
         "linkedin_email": db.get_setting("linkedin_email", ""),
         "linkedin_password": db.get_setting("linkedin_password", ""),
+        "linkedin_credentials_count": db.get_setting("linkedin_credentials_count", "1"),
+        "linkedin_switch_every_pages": db.get_setting("linkedin_switch_every_pages", "5"),
         "page_delay_min": db.get_setting("page_delay_min", "3"),
         "page_delay_max": db.get_setting("page_delay_max", "5"),
     }
+    for i in range(1, 6):
+        settings[f"linkedin_email_{i}"] = db.get_setting(f"linkedin_email_{i}", "")
+        settings[f"linkedin_password_{i}"] = db.get_setting(f"linkedin_password_{i}", "")
     google_tokens = db.get_google_tokens()
     return templates.TemplateResponse("settings.html", {
         "request": request, "user": user, "settings": settings,
@@ -610,8 +615,32 @@ async def save_linkedin_settings(request: Request,
     user = get_current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
-    db.set_setting("linkedin_email", linkedin_email)
-    db.set_setting("linkedin_password", linkedin_password)
+    form = await request.form()
+    try:
+        credentials_count = int(str(form.get("linkedin_credentials_count", "1")).strip() or "1")
+    except ValueError:
+        credentials_count = 1
+    credentials_count = max(1, min(credentials_count, 5))
+
+    switch_every_pages = str(form.get("linkedin_switch_every_pages", "5")).strip() or "5"
+    try:
+        switch_every_int = int(float(switch_every_pages))
+    except ValueError:
+        switch_every_int = 5
+    switch_every_int = max(1, min(switch_every_int, 50))
+
+    # Keep legacy single-account settings for compatibility.
+    slot1_email = str(form.get("linkedin_email_1", "")).strip() or linkedin_email.strip()
+    slot1_password = str(form.get("linkedin_password_1", "")).strip() or linkedin_password.strip()
+
+    db.set_setting("linkedin_credentials_count", str(credentials_count))
+    db.set_setting("linkedin_switch_every_pages", str(switch_every_int))
+    db.set_setting("linkedin_email", slot1_email)
+    db.set_setting("linkedin_password", slot1_password)
+    for i in range(1, 6):
+        db.set_setting(f"linkedin_email_{i}", str(form.get(f"linkedin_email_{i}", "")).strip())
+        db.set_setting(f"linkedin_password_{i}", str(form.get(f"linkedin_password_{i}", "")).strip())
+
     db.set_setting("page_delay_min", page_delay_min)
     db.set_setting("page_delay_max", page_delay_max)
     return RedirectResponse("/settings?msg=LinkedIn+settings+saved", status_code=302)
@@ -767,14 +796,23 @@ async def linkedin_session_status(request: Request):
     user = get_current_user(request)
     if not user:
         raise HTTPException(401)
-    # Check database cookie first
+    # Check rotation accounts first
+    active_accounts = db.get_active_linkedin_accounts()
+    total_accounts = len(db.get_all_linkedin_accounts())
+    if active_accounts:
+        return JSONResponse({
+            "has_session": True,
+            "account_count": total_accounts,
+            "active_count": len(active_accounts),
+        })
+    # Check legacy single cookie
     li_at = db.get_setting("linkedin_li_at", "")
     if li_at:
-        return JSONResponse({"has_session": True})
+        return JSONResponse({"has_session": True, "account_count": 0, "active_count": 0})
     # Fallback: check file-based cookies
     from config import LINKEDIN_COOKIES_DIR
     has_session = LINKEDIN_COOKIES_DIR.exists() and any(LINKEDIN_COOKIES_DIR.iterdir())
-    return JSONResponse({"has_session": has_session})
+    return JSONResponse({"has_session": has_session, "account_count": 0, "active_count": 0})
 
 
 @app.post("/api/linkedin/save-cookie")
@@ -819,6 +857,66 @@ async def clear_linkedin_session(request: Request):
         shutil.rmtree(LINKEDIN_COOKIES_DIR, ignore_errors=True)
         LINKEDIN_COOKIES_DIR.mkdir(exist_ok=True)
     return JSONResponse({"ok": True})
+
+
+# ── LinkedIn Account Rotation ──
+
+@app.get("/api/linkedin/accounts")
+async def list_linkedin_accounts(request: Request):
+    user = get_current_user(request)
+    if not user:
+        raise HTTPException(401)
+    accounts = db.get_all_linkedin_accounts()
+    # Mask cookies for security
+    for a in accounts:
+        cookie = a.get("li_at_cookie", "")
+        a["li_at_preview"] = cookie[:8] + "..." + cookie[-4:] if len(cookie) > 16 else "***"
+        del a["li_at_cookie"]
+    return JSONResponse({"accounts": accounts})
+
+
+@app.post("/api/linkedin/accounts/add")
+async def add_linkedin_account(request: Request):
+    user = get_current_user(request)
+    if not user:
+        raise HTTPException(401)
+    try:
+        body = await request.json()
+        label = body.get("label", "").strip()
+        li_at = body.get("li_at", "").strip()
+        if not label:
+            return JSONResponse({"ok": False, "error": "Please enter a label for this account"})
+        if not li_at:
+            return JSONResponse({"ok": False, "error": "Cookie value is empty"})
+        if len(li_at) < 50:
+            return JSONResponse({"ok": False, "error": "Cookie value looks too short. Make sure you copied the full li_at value."})
+        aid = db.add_linkedin_account(label, li_at)
+        return JSONResponse({"ok": True, "id": aid})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)})
+
+
+@app.post("/api/linkedin/accounts/{account_id}/delete")
+async def delete_linkedin_account_route(request: Request, account_id: int):
+    user = get_current_user(request)
+    if not user:
+        raise HTTPException(401)
+    db.delete_linkedin_account(account_id)
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/linkedin/accounts/{account_id}/toggle")
+async def toggle_linkedin_account_route(request: Request, account_id: int):
+    user = get_current_user(request)
+    if not user:
+        raise HTTPException(401)
+    try:
+        body = await request.json()
+        is_active = 1 if body.get("is_active", True) else 0
+        db.toggle_linkedin_account(account_id, is_active)
+        return JSONResponse({"ok": True})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)})
 
 
 @app.get("/api/linkedin/{scrape_id}")
@@ -897,10 +995,13 @@ async def scraper_detail(request: Request, scrape_id: int, search: str = "", pag
         page = total_pages
     offset = (page - 1) * per_page
     results = db.get_website_results(scrape_id, search=search, limit=per_page, offset=offset)
+    email_stats = db.get_website_email_stats(scrape_id)
     return templates.TemplateResponse("scraper_detail.html", {
         "request": request, "user": user, "page": "scraper",
         "scrape": scrape, "results": results, "total": total, "search": search,
         "current_page": page, "total_pages": total_pages,
+        "total_emails": email_stats["total_emails"],
+        "urls_with_emails": email_stats["urls_with_emails"],
     })
 
 
@@ -916,13 +1017,45 @@ async def scraper_export(request: Request, scrape_id: int):
 
 
 @app.post("/api/scraper/start")
-async def start_website_scrape(request: Request, urls: str = Form(...)):
+async def start_website_scrape(request: Request):
     user = get_current_user(request)
     if not user:
         raise HTTPException(401)
-    url_list = [u.strip() for u in urls.strip().splitlines() if u.strip()]
+
+    # Read form data (textarea + optional file)
+    form = await request.form()
+    urls = form.get("urls", "")
+
+    # Collect URLs from textarea
+    url_list = [u.strip() for u in urls.strip().splitlines() if u.strip()] if urls else []
+
+    # Handle file upload
+    uploaded = form.get("file")
+    if uploaded and hasattr(uploaded, "read"):
+        content = (await uploaded.read()).decode("utf-8", errors="ignore")
+        for line in content.splitlines():
+            # Support CSV: take first column if comma-separated
+            val = line.split(",")[0].strip().strip('"').strip("'")
+            if val and val.lower() not in ("url", "website", "link", "domain"):
+                url_list.append(val)
+
+    # Deduplicate by domain while preserving order
+    seen = set()
+    deduped = []
+    for u in url_list:
+        normalized = re.sub(r"^https?://", "", u.strip().lower()).split("/")[0].rstrip(".")
+        if not normalized:
+            continue
+        if normalized not in seen:
+            seen.add(normalized)
+            deduped.append(normalized)
+    url_list = deduped
+
     if not url_list:
         return RedirectResponse("/scraper?error=Please+enter+at+least+one+URL", status_code=302)
+    if len(url_list) > 1000:
+        return RedirectResponse(f"/scraper?error=Maximum+1000+URLs+allowed.+You+sent+{len(url_list)}", status_code=302)
+
     urls_json = json.dumps(url_list)
     scrape_id = db.create_website_scrape(user["id"], urls_json, len(url_list))
     task = asyncio.create_task(website_scraper.run_website_scrape(scrape_id))
